@@ -51,11 +51,17 @@ def main(cfg_path, budget=None):
             n_eval += 1
             wr.writerow([n_eval, gen, f"{r['fitness']:.5f}", f"{r['speed']:.5f}",
                          f"{r['yaw']:.2f}", int(r["ok"])] + [f"{v:.4f}" for v in x])
+            flag = ""
             if r["fitness"] > best["fitness"]:
                 best = dict(fitness=r["fitness"], speed=r["speed"], yaw=r["yaw"],
                             x=list(map(float, x)))
                 with open(os.path.join(outdir, "best.json"), "w", encoding="utf-8") as fh:
                     json.dump(best, fh, indent=1)
+                flag = "  * NEW BEST"
+            # Same per-candidate format as optimize_view.py. The control panel parses
+            # these lines to draw its convergence curve, so both must emit them.
+            print(f"  #{n_eval:4d}  speed {r['speed']:+.4f} m/s  "
+                  f"yaw {r['yaw']:5.1f} deg  fitness {r['fitness']:+.4f}{flag}")
         es.tell(X, F)
         gen += 1
         hist.append(best["fitness"])

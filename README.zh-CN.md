@@ -3,6 +3,22 @@
 **一句话**：把机器人模型当成可替换的输入，用 CMA-ES 在步态参数空间里自动搜出游得最快的泳姿。
 换机器人时**只替换 `robots/*.xml`**，其余代码一行不用改。
 
+<table>
+<tr>
+<td width="50%"><img src="docs/gait_demo.gif" alt="手工步态"></td>
+<td width="50%"><img src="docs/gait_optimized.gif" alt="优化后的步态"></td>
+</tr>
+<tr>
+<td><b>手工步态</b><br>0.025 m/s &middot; 0.11 体长/秒</td>
+<td><b>250 次 CMA-ES 评估之后</b><br>0.084 m/s &middot; 0.37 体长/秒</td>
+</tr>
+</table>
+
+同一台机器人、同样的水、三分钟搜索。右边快 3.4 倍，同时横滚剧烈 —— 这不是渲染问题，
+而是目标函数的真实盲区，详见 [Status](README.md#status)。
+
+> 界面与代码均为英文，本文给出对应的中文说明。English README: [README.md](README.md)
+
 ---
 
 ## 目录结构（四层解耦）
@@ -24,6 +40,8 @@ swimopt/
 ## 推荐用法：双击 `8_control_panel.bat`（图形界面，全都装在里面）
 
 一个窗口搞定：选/导入模型 → 勾选要搜的参数 → 设置预算 → 开始寻优（可边跑边看）→ 看收敛曲线和最优参数表。
+
+![控制面板](docs/control_panel.png)
 
 **面板四块**：
 > 面板界面为英文，下面括号里给出对应的英文标签。

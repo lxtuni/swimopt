@@ -14,3 +14,5 @@
 *.STL binary
 *.stl binary
 *.png binary
+*.gif binary
+*.jpg binary

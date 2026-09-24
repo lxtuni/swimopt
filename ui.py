@@ -44,7 +44,6 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("swimopt control panel -- gait optimization for a paddling quadruped")
-        root.geometry("1340x920")
         self.proc = None
         self.q = queue.Queue()
         self.hist = []            # (eval index, best fitness so far)
@@ -56,7 +55,22 @@ class App:
         for e in (self.e_wyaw, self.e_wene, self.e_amax, self.e_f0, self.e_f1, self.e_omax):
             e.bind("<FocusOut>", lambda ev: self._update_dim())
             e.bind("<Return>", lambda ev: self._update_dim())
+        self._size_to_content()
         self.root.after(300, self._pump)
+
+    def _size_to_content(self):
+        """Size the window to what the widgets actually need.
+
+        A fixed size clips the top rows on a high-DPI display, where the same
+        layout occupies more pixels.
+        """
+        self.root.update_idletasks()
+        w = max(self.root.winfo_reqwidth(), 1340)
+        h = max(self.root.winfo_reqheight(), 920)
+        w = min(w, self.root.winfo_screenwidth() - 80)
+        h = min(h, self.root.winfo_screenheight() - 120)
+        self.root.geometry(f"{w}x{h}")
+        self.root.minsize(min(w, 1100), min(h, 760))
 
     def _setup_fonts(self):
         """One UI font, one monospace font for numeric tables, sized to stay crisp."""
@@ -476,7 +490,10 @@ class App:
         span = max(y1 - y0, 1e-3)
         y0 -= span * 0.1
         y1 += span * 0.1
-        mL, mR, mT, mB = 46, 12, 12, 26
+        # Left margin follows the actual label width, otherwise the axis values are
+        # clipped on a high-DPI display where the same text is wider.
+        label_w = tkfont.Font(font=("", 9)).measure(f"{y1:+.3f}")
+        mL, mR, mT, mB = label_w + 16, 16, 14, 34
 
         def px(x):
             return mL + (x - x0) / (x1 - x0 + 1e-9) * (W - mL - mR)
@@ -492,21 +509,35 @@ class App:
         c.create_line(*pts, fill="#c81e3c", width=3)
         c.create_oval(px(xs[-1]) - 4, py(ys[-1]) - 4, px(xs[-1]) + 4, py(ys[-1]) + 4,
                       fill="#c81e3c", outline="")
-        c.create_text(W / 2, H - 8, text="evaluations", fill="#555", font=("", 9))
+        c.create_text(W / 2, H - 12, text="evaluations", fill="#555", font=("", 9))
         c.create_text(mL - 8, mT + 8, text=f"{y1:+.3f}", anchor="e", fill="#555", font=("", 9))
         c.create_text(mL - 8, H - mB, text=f"{y0:+.3f}", anchor="e", fill="#555", font=("", 9))
-        c.create_text(W - mR, H - mB + 14, text=f"{x1}", anchor="e", fill="#555", font=("", 9))
+        c.create_text(W - mR, H - mB + 15, text=f"{x1}", anchor="e", fill="#555", font=("", 9))
         c.create_text(mL + 6, mT + 8, text="fitness (higher is better)", anchor="w",
                       fill="#999", font=("", 9))
+
+    def _best_swimmer(self, cfg_file):
+        """A Swimmer for the current run config, rebuilt only when that file changes.
+
+        This runs on every new record during a search, and rebuilding the model each
+        time made the window stutter.
+        """
+        stamp = os.path.getmtime(cfg_file)
+        cached = getattr(self, "_sw_cache", None)
+        if cached and cached[0] == (cfg_file, stamp):
+            return cached[1]
+        from simulate import Swimmer, load_cfg
+        c = load_cfg(cfg_file)
+        sw = Swimmer(c["model"], c)
+        self._sw_cache = ((cfg_file, stamp), sw)
+        return sw
 
     def _show_best(self):
         try:
             import numpy as np
-            from simulate import Swimmer, load_cfg
             with open("results/best.json", encoding="utf-8") as fh:
                 b = json.load(fh)
-            c = load_cfg(RUN_CFG if os.path.exists(RUN_CFG) else self.cfg_path)
-            sw = Swimmer(c["model"], c)
+            sw = self._best_swimmer(RUN_CFG if os.path.exists(RUN_CFG) else self.cfg_path)
             p = sw.gait.decode(b["x"])
             self.lb_freq.config(text=f"Frequency: {p['freq']:.3f} Hz    "
                                      f"speed: {b.get('speed', 0):+.4f} m/s    "

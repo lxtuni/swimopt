@@ -131,8 +131,11 @@ class SineGait:
             mask[i0:i1] = self.opt_flags.get(key, True)
         self.mask = mask
         self.dim_opt = int(mask.sum())
-        # When phase is frozen, fill base_x with the chosen preset gait.
-        if self.preset:
+        # Fill base_x with the preset gait, but only when phase is actually frozen.
+        # The control panel always writes a preset_phase into its run config; applying
+        # it while phase is being optimized would silently move the CMA-ES start point,
+        # so the panel and the command line would disagree on identical settings.
+        if self.preset and not self.opt_flags.get("phase", True):
             for name, (i0, i1) in b.items():
                 if name == "phase1":
                     self.base_x[i0:i1] = self.preset_phases(self.preset)
