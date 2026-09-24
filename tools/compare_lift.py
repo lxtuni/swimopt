@@ -1,31 +1,31 @@
 # -*- coding: utf-8 -*-
 """
-Resistive versus lift-augmented propulsion, as a 2x2 experiment.
+Resistive versus lift-augmented propulsion: a 2x2 experiment over several seeds.
 
-    python tools/compare_lift.py [evaluations]
+    python tools/compare_lift.py [evaluations] [--seeds N] [--popsize P]
 
-Two factors, because they interact and reporting either alone is misleading:
+Factors:
+  physics    hydro.lift off ("drag") or on ("lift")
+  objective  the config's straight-and-level limits ("limits"), or none ("free")
 
-  physics   hydro.lift off or on
-  objective w_attitude 0 or the config value
+The limits are part of the design, not a detail. Lift on a flipper necessarily puts a
+moment on the hull, so constraining attitude constrains lift indirectly; measuring at
+one setting alone cannot separate "lift is a worse way to swim" from "lift is being
+taxed for tilting the robot".
 
-The attitude penalty is a confound for this question. Lift on a flipper necessarily
-produces a moment about the hull, so penalizing attitude penalizes lift indirectly. A
-lift-versus-drag comparison run only at one attitude weight cannot separate "lift is a
-worse way to swim" from "lift is being taxed for tilting the robot".
+Each cell runs N independent seeds, so a difference between cells can be compared with
+the spread inside a cell. Every winner is then re-scored under both physics models,
+which separates "lift changes which gait is best" from "lift changes what every gait
+scores". Finished runs are kept in results_cmp/<cell>_s<seed>/ and skipped on a rerun,
+so an interrupted study resumes where it stopped.
 
-Every winner is then scored under both physics models. The cross-evaluation separates
-"lift changes which gait is best" from "lift changes what every gait scores".
-
-Results are reported as physical quantities. Fitness values from different weights are
-not comparable and are shown only within a fixed objective.
-
-Outputs go to results_<case>/, leaving results/ alone.
+Reported quantities are physical: m/s, body lengths/s, degrees, watts, and the cost of
+transport in J/m. Fitness is never compared across objectives.
 """
-import os
-import sys
 import copy
 import json
+import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -35,107 +35,143 @@ from simulate import Swimmer, load_cfg   # noqa: E402
 import optimize                          # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT = os.path.join(ROOT, "results_cmp")
+NO_LIMITS = {"heading_deg": 180, "roll_deg": 180, "pitch_deg": 180}
+CELLS = [(lift, lim) for lim in (True, False) for lift in (False, True)]
 
 
-def case_tag(lift_on, att_on):
-    return f"{'lift' if lift_on else 'drag'}_{'att' if att_on else 'noatt'}"
+def tag(lift, lim):
+    return f"{'lift' if lift else 'drag'}_{'limits' if lim else 'free'}"
 
 
-def build_cfg(base, lift_on, att_on):
-    cfg = copy.deepcopy(base)
-    cfg["hydro"]["lift"] = lift_on
-    if not att_on:
-        cfg["w_attitude"] = 0.0
-    return cfg
+def cell_cfg(base, lift, lim):
+    c = copy.deepcopy(base)
+    c["hydro"]["lift"] = lift
+    if not lim:
+        c["limits"] = dict(NO_LIMITS)
+    return c
 
 
-def run_case(base, lift_on, att_on, budget):
-    """One search. Returns the config used and the best gait found."""
-    tag = case_tag(lift_on, att_on)
-    cfg = build_cfg(base, lift_on, att_on)
-    cfg["outdir"] = f"results_{tag}"
-    cfg_path = os.path.join(ROOT, f"_cmp_{tag}.json")
-    with open(cfg_path, "w", encoding="utf-8") as fh:
-        json.dump(cfg, fh, indent=1)
+def run(base, lift, lim, seed, budget, popsize):
+    out = os.path.join(OUT, f"{tag(lift, lim)}_s{seed}")
+    best_path = os.path.join(out, "best.json")
+    if os.path.exists(best_path):
+        with open(best_path, encoding="utf-8") as fh:
+            best = json.load(fh)
+        if best.get("_budget") == budget:
+            print(f"  {tag(lift, lim)} seed {seed}: already done, skipping")
+            return best
+    c = cell_cfg(base, lift, lim)
+    c.update(outdir=out, seed=seed, popsize=popsize)
+    os.makedirs(out, exist_ok=True)
+    path = os.path.join(out, "_cfg.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(c, fh, indent=1)
+    print(f"\n=== {tag(lift, lim)}  seed {seed}  budget {budget}  popsize {popsize} ===",
+          flush=True)
+    best = optimize.main(path, budget)
+    best["_budget"] = budget
+    with open(best_path, "w", encoding="utf-8") as fh:
+        json.dump(best, fh, indent=1)
+    return best
 
-    print(f"\n{'='*78}\n  CASE '{tag}': hydro.lift={lift_on}, "
-          f"w_attitude={cfg.get('w_attitude')}, budget {budget}\n{'='*78}")
-    optimize.main(cfg_path, budget)
-    with open(os.path.join(ROOT, cfg["outdir"], "best.json"), encoding="utf-8") as fh:
-        best = json.load(fh)
-    os.remove(cfg_path)
-    return cfg, best
+
+def evaluate(base, lift, lim, x):
+    c = cell_cfg(base, lift, lim)
+    sw = Swimmer(c["model"], c)
+    x = np.asarray(x, float)
+    return sw.rollout(x), sw.gait.decode(x)
 
 
-def evaluate_under(base, lift_on, att_on, x):
-    """Score a gait under chosen physics and objective, wherever it came from."""
-    cfg = build_cfg(base, lift_on, att_on)
-    sw = Swimmer(cfg["model"], cfg)
-    return sw.rollout(sw.gait.expand(np.asarray(x, float))), sw
+def stat(vals):
+    a = np.array(vals, float)
+    a = a[np.isfinite(a)]
+    if a.size == 0:
+        return "n/a"
+    sd = a.std(ddof=1) if a.size > 1 else 0.0
+    return f"{a.mean():.3f} ± {sd:.3f}"
+
+
+def straight_and_level(r, limits):
+    """Judged against the config's limits, whatever objective the gait came from."""
+    return (r["heading_rms"] <= limits["heading_deg"] and r["roll_rms"] <= limits["roll_deg"]
+            and r["pitch_rms"] <= limits["pitch_deg"])
 
 
 def main():
     os.chdir(ROOT)
-    budget = int(sys.argv[1]) if len(sys.argv) > 1 else 250
+    args = sys.argv[1:]
+    budget = next((int(a) for a in args if a.isdigit()), 4000)
+    seeds = int(args[args.index("--seeds") + 1]) if "--seeds" in args else 3
+    popsize = int(args[args.index("--popsize") + 1]) if "--popsize" in args else 16
     base = load_cfg(os.path.join(ROOT, "config.json"))
-    conditions = [(lift, att) for lift in (False, True) for att in (False, True)]
+    from simulate import DEFAULT_LIMITS
+    limits = dict(DEFAULT_LIMITS, **base.get("limits", {}))
 
     won = {}
-    for lift_on, att_on in conditions:
-        cfg, best = run_case(base, lift_on, att_on, budget)
-        won[(lift_on, att_on)] = best
+    for lift, lim in CELLS:
+        for s in range(1, seeds + 1):
+            won[(lift, lim, s)] = run(base, lift, lim, s, budget, popsize)
 
-    print(f"\n\n{'='*78}\n  WHAT EACH SEARCH FOUND, under the conditions it searched in"
-          f"\n{'='*78}")
-    print(f"{'search':<14}{'speed m/s':>11}{'BL/s':>8}{'freq Hz':>9}{'roll':>8}"
-          f"{'pitch':>8}{'yaw':>8}{'power W':>10}{'lift share':>12}")
-    freqs = {}
-    for lift_on, att_on in conditions:
-        tag = case_tag(lift_on, att_on)
-        r, sw = evaluate_under(base, lift_on, att_on, won[(lift_on, att_on)]["x"])
-        p = sw.gait.decode(sw.gait.expand(won[(lift_on, att_on)]["x"]))
-        freqs[(lift_on, att_on)] = p["freq"]
-        print(f"{tag:<14}{r['speed']:>11.4f}{r['bl_s']:>8.3f}{p['freq']:>9.3f}"
-              f"{r['roll_amp']:>8.1f}{r['pitch_amp']:>8.1f}{r['yaw']:>8.1f}"
-              f"{r['power']:>10.1f}{r['lift_share']:>12.3f}")
+    rows = {}
+    for lift, lim in CELLS:
+        rs = []
+        for s in range(1, seeds + 1):
+            r, p = evaluate(base, lift, lim, won[(lift, lim, s)]["x"])
+            r["freq"] = p["freq"]
+            # cost of transport: energy per metre; undefined for a gait going nowhere
+            r["cot"] = r["power"] / r["speed"] if r["speed"] > 1e-3 else float("nan")
+            r["level"] = straight_and_level(r, limits)
+            rs.append(r)
+        rows[(lift, lim)] = rs
 
-    print(f"\n{'='*78}\n  CROSS-EVALUATION: every winner re-scored under BOTH physics"
-          f"\n  (speed is physical and always comparable; fitness only within a column)"
-          f"\n{'='*78}")
-    print(f"{'gait from':<14}{'scored under':<16}{'speed m/s':>11}{'fwd lift':>10}"
-          f"{'fwd drag':>10}{'roll':>8}{'power W':>10}")
+    W = 20
+    print(f"\n\n{'='*113}\n  EACH CELL: mean ± sd over {seeds} seeds, {budget} evaluations each"
+          f"\n{'='*113}")
+    print(f"{'cell':<13}{'speed m/s':>{W}}{'BL/s':>{W}}{'freq Hz':>{W}}{'power W':>{W}}"
+          f"{'COT J/m':>{W}}")
+    for key, rs in rows.items():
+        print(f"{tag(*key):<13}{stat([r['speed'] for r in rs]):>{W}}"
+              f"{stat([r['bl_s'] for r in rs]):>{W}}{stat([r['freq'] for r in rs]):>{W}}"
+              f"{stat([r['power'] for r in rs]):>{W}}{stat([r['cot'] for r in rs]):>{W}}")
+    print(f"\n{'cell':<13}{'RMS heading':>{W}}{'RMS roll':>{W}}{'RMS pitch':>{W}}"
+          f"{'fwd lift N*s':>{W}}{'straight+level':>{W}}")
+    for key, rs in rows.items():
+        print(f"{tag(*key):<13}{stat([r['heading_rms'] for r in rs]):>{W}}"
+              f"{stat([r['roll_rms'] for r in rs]):>{W}}"
+              f"{stat([r['pitch_rms'] for r in rs]):>{W}}"
+              f"{stat([r['thrust_lift'] for r in rs]):>{W}}"
+              f"{sum(r['level'] for r in rs):>{W-3}}/{len(rs)}")
+    print(f"(straight+level is judged against the config limits for every cell: "
+          f"{limits['heading_deg']:g}/{limits['roll_deg']:g}/{limits['pitch_deg']:g} deg)")
+
+    print(f"\n{'='*96}\n  CROSS-EVALUATION: each winner re-scored under the OTHER physics"
+          f"\n  (same objective as its cell; speed in m/s)\n{'='*96}")
     cross = {}
-    for lift_on, att_on in conditions:
-        for phys in (False, True):
-            r, _ = evaluate_under(base, phys, att_on, won[(lift_on, att_on)]["x"])
-            cross[(lift_on, att_on, phys)] = r
-            print(f"{case_tag(lift_on, att_on):<14}"
-                  f"{('lift physics' if phys else 'drag physics'):<16}"
-                  f"{r['speed']:>11.4f}{r['thrust_lift']:>10.3f}"
-                  f"{r['thrust_drag']:>10.3f}"
-                  f"{r['roll_amp']:>8.1f}{r['power']:>10.1f}")
-    print("fwd lift / fwd drag: signed impulse along the heading, N*s. "
-          "Positive drives the robot forwards.")
+    for lim in (True, False):
+        for lift in (False, True):
+            own, other = [], []
+            for s in range(1, seeds + 1):
+                x = won[(lift, lim, s)]["x"]
+                own.append(evaluate(base, lift, lim, x)[0])
+                other.append(evaluate(base, not lift, lim, x)[0])
+            cross[(lift, lim)] = (own, other)
+            print(f"{tag(lift, lim):<13} own physics {stat([r['speed'] for r in own]):>16}"
+                  f"   other physics {stat([r['speed'] for r in other]):>16}"
+                  f"   straight+level there: "
+                  f"{sum(straight_and_level(r, limits) for r in other)}/{seeds}")
 
-    print(f"\n{'='*78}\n  READING\n{'='*78}")
-    for att_on in (False, True):
-        label = "with attitude penalty" if att_on else "no attitude penalty  "
-        d = cross[(False, att_on, True)]["speed"]   # drag-found gait, judged with lift
-        l = cross[(True, att_on, True)]["speed"]    # lift-found gait, judged with lift
-        faster = "the lift-aware search" if l > d else "the resistive search"
-        print(f"{label}: under lift physics the lift-aware winner swims {l:.4f} m/s "
-              f"and the resistive winner {d:.4f} m/s -> {faster} is faster.")
-    s_noatt = cross[(True, False, True)]["lift_share"]
-    s_att = cross[(True, True, True)]["lift_share"]
-    print(f"\nLift share of forward impulse in the lift-aware winners: "
-          f"{s_noatt:.2f} without the attitude penalty, {s_att:.2f} with it.")
-    print(f"Stroke frequency: {freqs[(False, True)]:.2f} Hz resistive, "
-          f"{freqs[(True, True)]:.2f} Hz lift-aware (both with attitude penalty).")
-    print("\nCaveats that belong with any use of these numbers:")
-    print("  - cl = flat-plate textbook value, NOT measured on the real flipper.")
-    print("  - one seed, one budget. Re-run with other seeds before trusting a margin.")
-    print("  - a frequency sitting on its range bound means the bound, not the "
-          "physics, chose it.")
+    summary = {tag(*k): [{kk: r[kk] for kk in ("speed", "bl_s", "freq", "power", "cot",
+                                                "heading_rms", "roll_rms", "pitch_rms",
+                                                "thrust_lift", "thrust_drag", "level")}
+                         for r in rs] for k, rs in rows.items()}
+    with open(os.path.join(OUT, "summary.json"), "w", encoding="utf-8") as fh:
+        json.dump({"budget": budget, "seeds": seeds, "popsize": popsize,
+                   "cells": summary}, fh, indent=1, default=float)
+    print(f"\nwritten {os.path.relpath(os.path.join(OUT, 'summary.json'), ROOT)}")
+    print("Caveats: cl is the flat-plate textbook value, not measured on the real "
+          "flipper; freq_range caps the stroke rate at the servo limit, so a winner on "
+          "that bound was chosen by the bound.")
 
 
 if __name__ == "__main__":

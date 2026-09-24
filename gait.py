@@ -6,10 +6,12 @@ Scans every actuator in the model and drives it with a truncated Fourier series:
 
     q_i(t) = offset_i + sum_{h=1..H} amp_i^h * sin(2*pi*h*f*t + phase_i^h)
 
-H = 2 is not optional. With a single harmonic the thrust of an antiphase leg pair is
-exactly equal and opposite, all four legs cancel, and net thrust is identically zero.
-The second harmonic is invariant under a phase shift of pi, which is the mathematical
-counterpart of the real robot's passive flipper feathering on the recovery stroke.
+The second harmonic is invariant under a phase shift of pi, which makes it the natural
+way to express flipper feathering: spread on the power stroke, furl on recovery. It is
+not required for net thrust here. With several independently phased joints per leg a
+single harmonic already sweeps the leg non-reciprocally (0.16 m/s on toy_quad with a
+pure sinusoid, 0.30 m/s with the duty warp); an earlier comment claiming otherwise was
+wrong and had never been tested.
 
 Parameter vector = [freq, duty] + per-actuator (amp^h, phase^h) + offsets.
 Actuators can share amp/offset through `groups`, which lowers the search dimension:

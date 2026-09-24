@@ -9,26 +9,40 @@
 <td width="50%"><img src="docs/gait_optimized.gif" alt="优化后的步态"></td>
 </tr>
 <tr>
-<td><b>手工步态</b><br>0.025 m/s &middot; 0.11 体长/秒</td>
-<td><b>250 次 CMA-ES 评估之后</b><br>0.073 m/s &middot; 0.32 体长/秒</td>
+<td><b>手工步态</b><br>0.09 m/s &middot; 0.38 体长/秒 &middot; 俯仰晃动 27°</td>
+<td><b>4000 次 CMA-ES 评估之后</b><br>0.34 m/s &middot; 1.41 体长/秒 &middot; 直行且平稳</td>
 </tr>
 </table>
 
-同一台机器人、同样的水、两分钟搜索，快 2.9 倍。目标函数要求什么、没要求什么，会直接
-写在机器人的动作里，实测对照见 [Status](README.md#status)。
+同一台机器人、同样的水，在 16 核笔记本上搜索约五分钟，快 3.7 倍，且航向、横滚 RMS
+都在 10 度以内、俯仰在 15 度以内。这是 3 个种子里最好的一个，另两个为 0.31 和 0.17 m/s，
+单次运行的可靠性见 [Status](README.md#status)。
+
+> **更正**：2026 年 9 月之前 README 中的数字已撤回。当时的模型把关节限位按角度而非弧度解析，
+> 每条腿都被锁在 ±1.3 度，执行器约九成功率花在对抗关节限位上。修正后同一手工步态从
+> 0.025 m/s 变为 0.092 m/s。阻力与升力的对照实验已在修正后的模型上用多个种子完全重做。
 
 > **推进机制开关**：`hydro.lift` 默认 **false**，此时模型只有阻力型推进，升力型步态
 > 无法胜出，因为让它胜出的机制没有参与计算。设为 **true** 后，带 `cl` 的连杆会获得
 > 垂直于来流的升力，用平板后失速模型 `Cl(α) = cl·sin(2α)`。
 >
-> 每次仿真都会报告 `lift_share`，即前向冲量中来自升力项的比例，所以"这是升力型还是
+> 每次仿真都会报告升力项和阻力项各自贡献的有符号前向冲量，所以"这是升力型还是
 > 阻力型"是可测量的，不靠看动画判断。完整对照实验：
 >
 > ```bash
-> python tools/compare_lift.py 250
+> python tools/compare_lift.py 4000 --seeds 3
 > ```
 >
-> 它跑两次只有 `hydro.lift` 不同的搜索，再把两个最优步态在两种物理下交叉评估。
+> 它是一个二乘二实验：物理（仅阻力 / 阻力加升力）乘以目标（直行平稳的限值 / 无限值），
+> 每格跑多个随机种子，再把每个最优步态放到另一种物理下交叉评估。
+>
+> **实测结论**（每次 4000 次评估，每格 3 个种子）：在直行平稳的限值下，
+> 只要模型包含升力，**三次搜索全部选择了升力型推进**，升力提供全部前向推力，阻力是纯损耗。
+> 但升力型步态**并不更快**，速度差小于种子间的离散；**是否更节能也尚无定论**，
+> 因为它们同时也更慢，而运输代价本身随速度上升，需要在相同速度下比较。
+> 无限值的步态翻滚剧烈、脚蹼有 31% 到 53% 的时间露出水面，超出了模型的有效范围。
+> 详见 [README.md](README.md#what-the-comparison-found)。
+>
 > 注意 `cl` 尚未标定，1.1 是平板教科书值，结论在实测脚蹼之前只具定性意义。
 
 > 界面与代码均为英文，本文给出对应的中文说明。English README: [README.md](README.md)
@@ -63,8 +77,10 @@ swimopt/
 1. **Model（模型）**：下拉选 `robots/` 里的模型；`Import URDF…` 一键转换并自动启用
 2. **Search space（搜索空间）**：勾选 `Frequency / Amplitude / Phase / Offset` —— **取消勾选=冻结该参数**，右侧实时显示 `optimizing X / Y dims`
    - 想固定步态只搜频率和幅度？→ **取消 `Phase` 和 `Offset`**，在下拉里选 `diag / fb / lr / wave / inphase`
-3. **Run settings（运行设置）**：`Evaluations`（评估次数）、`Seconds per rollout`（每次仿真秒数）、`Population size`（种群大小）、`Random seed`（随机种子）、`Playback`（可视化模式：every candidate / one in five / new records only / no window）
-4. **结果**：左侧表格列出**每个电机的运动规律**（offset / 1 次幅度相位 / 2 次幅度相位），右侧**收敛曲线** + σ 值
+3. **Run settings（运行设置）**：`Evaluations`（评估次数）、`Seconds per rollout`（每次仿真秒数）、`Population size`（种群大小）、`Random seed`（随机种子，必须非零）、`Playback`（可视化模式：every candidate / one in five / new records only / no window）
+4. **Objective（目标）**：航向、横滚、俯仰三项 RMS 的容差（度），以及可选的功率权重。预设有 `Straight + level`、`Strict`、`Power-thrifty` 和用于对照的 `Fastest (no limits)`
+
+下方是**结果区**：左侧表格列出**每个电机的运动规律**（offset / 1 次幅度相位 / 2 次幅度相位），右侧**收敛曲线** + σ 值。
 
 ---
 
@@ -80,7 +96,7 @@ swimopt/
 两个同时满足 = 收敛。想再确认，把"随机种子"改个数字重跑一次，若结果接近 → 找到的是**稳定的最优**，不是运气。
 
 **Q: 只想让它以特定姿态运动，只搜频率和幅度？**
-面板里**取消勾选 `Phase` 和 `Offset`**，选好固定步态即可 —— 维度会从 34 维降到 **7 维**，搜索快得多，结果也更好解释（"在对角步态下，最优频率是 X、幅度是 Y"）。这正是做**步态对比实验**的正确姿势：固定步态族分别优化，再比谁快。
+面板里**取消勾选 `Phase` 和 `Offset`**，选好固定步态即可 —— 维度会从 35 维降到 **8 维**，搜索快得多，结果也更好解释（"在对角步态下，最优频率是 X、幅度是 Y"）。这正是做**步态对比实验**的正确姿势：固定步态族分别优化，再比谁快。
 
 ---
 
@@ -90,7 +106,7 @@ swimopt/
 |---|---|
 | `0_setup_env.bat` | 装 Python 环境和 MuJoCo（**第一次只需运行一次**） |
 | `1_demo_gait.bat` | 打开 3D 窗口，看机器人用手工步态游 |
-| `2_optimize.bat` | CMA-ES 自动搜最优泳姿（约 3 分钟，结果存 results/） |
+| `2_optimize.bat` | CMA-ES 自动搜最优泳姿（预算取自 config.json，并行评估，结果存 results/） |
 | `3_view_best.bat` | 打开窗口，看搜出来的最优泳姿 |
 | `4_import_model.bat` | 把你的 URDF 转成本管线可用的模型 |
 | `5_optimize_live.bat` | **边寻优边看**：每试一组参数就播放一次，跑完自动换下一组 |
@@ -99,12 +115,12 @@ swimopt/
 **看训练过程的三种模式**（`optimize_view.py`）：
 
 ```bat
-python optimize_view.py config.json 250              REM 每组都看(快进播放)
-python optimize_view.py config.json 250 --every 5    REM 每5组看1组, 其余后台快跑
-python optimize_view.py config.json 250 --best       REM 只回放刷新纪录的那几次
-python optimize_view.py config.json 250 --rt         REM 实时速度(慢, 但看得最清楚)
+python optimize_view.py config.json 1000              REM 每组都看(快进播放)
+python optimize_view.py config.json 1000 --every 5    REM 每5组看1组, 其余后台快跑
+python optimize_view.py config.json 1000 --best       REM 只回放刷新纪录的那几次
+python optimize_view.py config.json 1000 --rt         REM 实时速度(慢, 但看得最清楚)
 ```
-> 关掉窗口 = 提前结束并保存当前最优；控制台每次都会打印速度/偏航/fitness，刷新纪录时标 ★
+> 关掉窗口 = 提前结束并保存当前最优；控制台每次都会打印速度/偏航/fitness，刷新纪录时标 * NEW BEST
 
 > ⚠️ **不要直接双击 .py 文件**——出错时窗口会瞬间关闭，什么也看不到。
 > .bat 会在结束/出错时停住并显示原因（按任意键才关）。
@@ -113,23 +129,29 @@ python optimize_view.py config.json 250 --rt         REM 实时速度(慢, 但�
 
 ## 手动安装（一次）
 
+在仓库目录里执行：
+
 ```bat
-cd C:\Users\L\Desktop\SA
 python -m venv mjenv
 mjenv\Scripts\activate
-pip install mujoco cma numpy
+pip install -r requirements.txt
+```
+
+检查安装是否正常（可选）：
+
+```bat
+pip install -r requirements-dev.txt
+python -m pytest
 ```
 
 ## 三个命令
 
 ```bat
-cd C:\Users\L\Desktop\SA\swimopt
-
 REM 1) 先看一眼：打开窗口，播放手工示例步态
 python view.py config.json --demo
 
-REM 2) 自动寻优：CMA-ES 搜最优泳姿（约200次仿真，几分钟；结果存 results/）
-python optimize.py config.json 200
+REM 2) 自动寻优：CMA-ES 搜最优泳姿（预算取自 config.json，默认 4000 次，并行几分钟）
+python optimize.py config.json
 
 REM 3) 看优化结果：播放搜出来的最优步态
 python view.py config.json results/best.json
@@ -145,7 +167,9 @@ python view.py config.json results/best.json
 
 **① 转换模型**：双击 `4_import_model.bat` → 把你的 `.urdf` 拖进窗口 → 回车
    脚本会自动：修复 `package://` 网格路径、加关节阻尼/armature（稳定性）、
-   为驱动关节加执行器、按刚体名给几何体命名、输出报告。
+   **给根连杆加自由关节**（URDF 没有浮动底座，不加的话机器人焊死在世界上，根本游不动）、
+   **把与碰撞体重复的视觉几何体标成 `vis_`**（否则浮力、阻力、附加质量全部翻倍）、
+   为驱动关节加执行器并把控制范围限制在关节自身范围内、按刚体名给几何体命名、输出报告。
    结果存到 `robots/你的名字.xml`。
 
    也可以用命令行（能自定义参数）：
@@ -165,7 +189,12 @@ python view.py config.json results/best.json
 
 **③ 跑**：双击 `1_demo_gait.bat` 先看动起来了没，再 `2_optimize.bat`。
 
-> 已经帮你转好一份：`robots/body2.xml`（用的是旧版 BODY2 URDF），配置见 `config_body2.json`。
+> ⚠️ **本机若有旧版导入工具生成的 `robots/body2.xml`，请重新导入。** 旧工具有两个缺陷：
+> 不加自由关节（机器人焊死在世界上），且视觉与碰撞几何体都参与水动力计算（所有流体力翻倍）。
+> 现在的水动力模块会自动跳过重复的视觉几何体，并在启动信息里提示缺失的自由关节，
+> 但重新导入才是根本解决办法。
+>
+> 旧说明：已经帮你转好一份 `robots/body2.xml`（用的是旧版 BODY2 URDF），配置见 `config_body2.json`。
 > ⚠️ 注意：旧 URDF 是**开环树**（平行四边形没闭合、坐标系没归零），能跑但产生不了推力。
 > 等新模型（销轴都是 revolute）到位后重新导入，再用 `<equality><connect>` 闭合即可。
 
@@ -192,10 +221,21 @@ python view.py config.json results/best.json
 - **水动力模型**：Morison 型逐连杆力
   `F = ρgV·f + ½ρ·C_d·A·v|v|·f + c_v·v·f`，`f` = 部分浸没比例（按几何真实竖直跨度算，含姿态）。
   附加质量用"质量戏法"（`m_a = C_a·ρ·V` 加进刚体 + 恒力补偿重力），数值绝对稳定。
-- **为什么必须双谐波**：脚蹼若只用 1 倍频正弦，反相腿的推力精确反号 → 四腿抵消，净推力恒为 0（已数值验证）。
-  二次谐波在相位平移 π 下不变，正好对应真机被动脚蹼的"整流"顺桨 —— 这是产生净推力的数学前提。
-- **目标函数**：`fitness = 沿初始朝向的净位移速度 − w_yaw·偏航率 − w_energy·能耗`
-  用"沿初始朝向投影"而非总路程，打转会被自动惩罚。
+- **二次谐波的作用**：它在相位平移 π 下不变，正好用来表达真机被动脚蹼的"整流"顺桨
+  （发力时张开、回程时收拢）。
+  **更正**：旧版此处断言"只用 1 倍频时反相腿推力精确抵消、净推力恒为 0，已数值验证"。
+  **这对本模型不成立，且此前从未验证过。** 抵消论证只适用于严格往复的运动；toy_quad 每条腿有
+  三个独立相位的关节，单谐波下腿部已是非往复运动。实测（各 1600 次评估）：单谐波、占空比固定
+  50%（纯正弦）仍有 0.156 m/s；单谐波、占空比自由（搜索选了 26%）达到 0.296 m/s 且直行平稳。
+  快划慢收本身就能在二次阻力下产生净推力。对于只有一个主动关节、脚蹼被动的腿（如 BODY2），
+  二次谐波是否必需，应当实测而不是假定。
+- **目标函数**：`fitness = 体长/秒 − Σ max(0, RMS − 限值)/限值 − w_energy·功率`
+  对航向、横滚、俯仰三项的 RMS 分别设限值（默认 10、10、15 度）。在限值内只比速度，
+  超出部分每超 100% 扣 1 个体长每秒，比任何步态能游的都多，所以超限步态无法靠速度翻盘。
+  速度沿初始朝向投影，打转会被自动惩罚。旧版用加法权重 `w_yaw`、`w_attitude`，
+  权重只在调参时的速度量级下有效；模型修好、腿真正能摆动后，速度项压倒了惩罚，
+  最优步态横滚 42 度、偏航 44 度。
+- **测量窗口**：按整数个划水周期计时，避免在一次划水中途截断带来的速度偏差。
 - **优化器**：CMA-ES（Hansen & Ostermeier 2001），无梯度，因 MuJoCo 标准版不可微。
   工作流参照 Lee et al. 2025（他们用可微仿真+L-BFGS，我们换成无梯度）。
 - **防爆护栏**：速度超阈值或出现 NaN → 立即判负分并中止，优化器自动学会避开奇异区。
@@ -211,6 +251,7 @@ python view.py config.json results/best.json
 | 水面高度 | `hydro.water_z` |
 | 频率/幅度搜索范围 | `gait.freq_range / amp_range` |
 | 谐波数（1=纯正弦，2=可整流顺桨） | `gait.harmonics` |
-| 目标：只看速度 / 兼顾省电 | `w_yaw`, `w_energy` |
+| 目标：直行、平稳的容差 / 兼顾省电 | `limits.heading_deg / roll_deg / pitch_deg`, `w_energy` |
+| 并行进程数 | `workers`（默认 `"auto"`，结果与串行完全一致） |
 | 搜索预算、种群大小 | `budget`, `popsize` |
 | 每次仿真时长 | `sim_time` |

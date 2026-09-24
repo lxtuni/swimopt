@@ -12,14 +12,14 @@ searching the space of possible strokes.
 <td width="50%"><img src="docs/gait_optimized.gif" alt="The same robot swimming with the optimized gait"></td>
 </tr>
 <tr>
-<td><b>Hand-built gait</b><br>0.025 m/s &middot; 0.11 body lengths/s</td>
-<td><b>After 250 CMA-ES evaluations</b><br>0.073 m/s &middot; 0.32 body lengths/s</td>
+<td><b>Hand-built gait</b><br>0.09 m/s &middot; 0.38 body lengths/s &middot; rocks 27° in pitch</td>
+<td><b>After 4000 CMA-ES evaluations</b><br>0.34 m/s &middot; 1.41 body lengths/s &middot; straight and level</td>
 </tr>
 </table>
 
-Same robot, same water, two minutes of searching, 2.9 times faster. What the objective
-does and does not ask for shows up directly in how the robot moves — see
-[Status](#status) for the measured trade-off.
+Same robot, same water, about five minutes of searching on a 16-core laptop: 3.7 times
+faster, while staying inside 10 degrees RMS of heading and roll and 15 of pitch. See
+[Status](#status) for how reliable that number is.
 
 A Chinese translation of the user guide is available in [README.zh-CN.md](README.zh-CN.md).
 
@@ -67,7 +67,7 @@ pip install -r requirements.txt
 
 ```bash
 python view.py     config.json --demo    # watch a hand-built gait swim
-python optimize.py config.json 250       # search for a better one (~3 min)
+python optimize.py config.json 4000      # search for a better one (a few minutes)
 python view.py     config.json           # watch what it found
 ```
 
@@ -75,7 +75,17 @@ On Windows, double-click the numbered launchers instead — `0_setup_env.bat` bu
 local virtualenv, then `1_demo_gait.bat` through `8_control_panel.bat` run the same
 steps in order.
 
-Results land in `results/` as `best.json`, `log.csv` and `convergence.json`.
+Candidates are evaluated in parallel, one worker process per candidate up to your CPU
+count; a parallel search returns exactly what a serial one would. Results land in
+`results/`: `best.json` holds the full parameter vector, `run_config.json` the exact
+configuration and library versions, plus `log.csv` and `convergence.json`.
+
+To check an installation, or any change you make:
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
 
 ---
 
@@ -84,7 +94,7 @@ Results land in `results/` as `best.json`, `log.csv` and `convergence.json`.
 `python ui.py`, or double-click `8_control_panel.bat`. Everything above, without the
 command line.
 
-![The swimopt control panel after a 250-evaluation run](docs/control_panel.png)
+![The swimopt control panel after a 4000-evaluation run, seed 2](docs/control_panel.png)
 
 The four numbered sections are the whole workflow:
 
@@ -97,8 +107,9 @@ The four numbered sections are the whole workflow:
    and amplitude.
 3. **Run settings** — budget, rollout length, population, seed, and how much of the
    search you want to watch happen.
-4. **Objective** — the weights that decide what "swimming well" means, with presets
-   for *fastest*, *fast and straight*, *strictly straight* and *power-thrifty*.
+4. **Objective** — how straight and how level the gait must be, as RMS limits in
+   degrees on heading, roll and pitch, plus an optional power weight. Presets cover
+   *straight and level*, *strict*, *power-thrifty*, and *no limits* for comparison.
 
 Below them: the best gait so far, one row per actuator, next to the convergence curve
 and the CMA-ES step size.
@@ -119,8 +130,12 @@ import_model.py  URDF to MJCF importer (portable meshes, automatic actuators)
 set_model.py     switch the active robot
 view.py          replay a gait or the best result
 config.json      every parameter, with inline comments
-tools/           regenerate the images in this README
+tools/           the drag-versus-lift study, and the images in this README
+tests/           pytest suite: physics checks, parallel == serial, importer
 ```
+
+There is one simulation loop, in `Swimmer.rollout`. The live viewer renders through
+its callback rather than keeping a copy, so what you watch is exactly what is scored.
 
 ---
 
@@ -157,8 +172,8 @@ relative flow. A swimmer built only from them can only push water backwards — 
 paddles. Real flippers also work as foils, generating force *across* the flow, and that
 mechanism needs its own term.
 
-`hydro.lift` adds it, and is **off by default** so that every earlier result stays
-reproducible:
+`hydro.lift` adds it. It is **off by default**, so the base model stays purely
+resistive unless you ask for lift:
 
 ```
 Cl(alpha) = cl * sin(2*alpha)      alpha = angle between the flow and the plate's plane
@@ -179,54 +194,80 @@ produces almost nothing in the resistive model and a great deal with lift enable
 > statement about drag-based paddling, not about optimal swimming in general. Say which
 > setting produced any number you report.
 
-Every rollout reports `lift_share`, the fraction of forward impulse produced by the
-lift term, so "is this gait lift-based or drag-based" is a measurement rather than an
-impression. To run the comparison end to end:
+Every rollout reports the signed forward impulse from the lift term and from the
+resistive terms, so "is this gait lift-based or drag-based" is a measurement rather
+than an impression. The split is checked against momentum conservation by the tests.
+To run the comparison end to end:
 
 ```bash
-python tools/compare_lift.py 250
+python tools/compare_lift.py 4000 --seeds 3
 ```
 
-It runs two identical searches differing only in `hydro.lift`, then scores each winner
-under *both* physics models. The cross-evaluation is the part that matters: it
-separates "lift changes which gait is best" from "lift changes what every gait scores".
+It is a 2x2: physics (lift off, lift on) against objective (the straight-and-level
+limits, or no limits). The objective has to be a factor: lift on a flipper necessarily
+puts a moment on the hull, so constraining attitude constrains lift, and measuring at
+one setting cannot separate "lift is a worse way to swim" from "lift is being taxed
+for tilting the robot". Every cell runs several seeds, so differences between cells can
+be read against the spread inside a cell, and every winner is re-scored under the other
+physics.
 
 **`cl` is not calibrated.** 1.1 is the textbook flat-plate value. Results from it are
 qualitative until the real flipper is measured.
 
-#### What the comparison actually found
+#### What the comparison found
 
-`toy_quad`, 250 evaluations per cell, seed 1. The attitude penalty is varied alongside
-the physics because lift on a flipper necessarily produces a moment, so penalizing
-attitude penalizes lift indirectly. Reporting only one attitude weight hides that.
+`toy_quad`, 4000 evaluations per run, population 16, three seeds per cell, mean ± sd.
+Only the constrained cells describe gaits a robot could use; see below for why the
+unconstrained ones are not trustworthy.
 
-| search | speed m/s | freq Hz | roll | power W |
+| straight and level | speed m/s | stroke Hz | power W | cost of transport J/m |
 |---|---|---|---|---|
-| drag, no attitude penalty | 0.084 | 2.29 | 62 deg | 426 |
-| drag, attitude penalty | 0.073 | 0.88 | 22 deg | 146 |
-| lift, no attitude penalty | 0.080 | 0.71 | 141 deg | **71** |
-| lift, attitude penalty | 0.025 | 0.24 | 9 deg | **31** |
+| drag only | 0.274 ± 0.087 | 1.72 ± 0.16 | 7.0 ± 3.8 | 24 ± 8 |
+| drag + lift | 0.220 ± 0.030 | 1.28 ± 0.59 | 3.1 ± 0.7 | 14 ± 2 |
 
-The efficiency signature of lift-based propulsion is clearly there: the third row
-reaches 95 % of the fastest resistive gait's speed on **17 % of the power**. In that
-gait lift supplies +0.71 N*s of forward impulse while the resistive terms supply
--0.62 N*s — lift does all the pushing and drag is pure loss, which is what lift-based
-propulsion means.
+<table>
+<tr>
+<td width="50%"><img src="docs/gait_lift.gif" alt="Lift-based optimum, straight and level"></td>
+<td width="50%"><img src="docs/gait_free.gif" alt="Unconstrained optimum, rowing across the surface"></td>
+</tr>
+<tr>
+<td><b>Lift on, straight and level</b><br>thrust comes from lift; drag is pure loss</td>
+<td><b>Drag only, no limits</b><br>fast, rolling, flippers out of the water half the time</td>
+</tr>
+</table>
 
-What it did *not* do is emerge as the best gait overall. With attitude penalized, the
-lift-aware search collapses to a slow 0.24 Hz stroke. That frequency sits on the lower
-bound of `freq_range`, so the bound chose it, not the physics.
+What the data supports:
 
-Cross-evaluation shows the resistive results are fragile: re-scored under lift physics,
-both resistive winners roll to 180 degrees — fully inverted — and one ends up moving
-backwards. A gait optimized without lift is not merely suboptimal once lift exists, it
-is unstable.
+- **With lift in the model, every search chose lift-based propulsion.** In all three
+  seeds the lift term supplies +1.4 to +2.0 N*s of forward impulse while the resistive
+  terms supply −1.2 to −1.8 N*s: lift does all of the pushing and drag is pure loss.
+  The optimizer could have kept paddling and taken lift as a bonus; it never did. In
+  the drag-only cells the resistive terms are the net propulsion, as they must be.
+- **They are not faster.** The speed gap, 0.054 m/s, is smaller than the spread
+  between seeds of the drag-only cell. Nothing here says which is faster.
+- **Whether they are more efficient is not settled either.** On average the lift-based
+  gaits cost 14 ± 2 J/m against 24 ± 8, but they are also slower, and cost of
+  transport rises with speed because drag grows with its square. The one drag-only gait
+  at a comparable speed, 0.175 m/s, costs 14.9 J/m, inside the lift-based range of 11.8
+  to 16.1. This data cannot separate "lift is more efficient" from "slower is cheaper";
+  that needs a comparison at matched speed.
+- **Each optimum depends on its physics.** Re-scored with lift on, the drag-only
+  winners fall to 0.07 m/s and none stays straight and level. The lift-based winners
+  re-scored without lift fall to 0.09 m/s.
 
-**Do not read this as settling drag versus lift.** `cl` is uncalibrated, it is one seed
-at one budget, a frequency bound is active, and the objective has no term for the
-efficiency that lift is good at. Testing "lift-based is optimal" properly means setting
-`w_energy` above zero, so the objective measures cost of transport, which is the
-quantity the claim is about.
+What it does not support: the unconstrained cells report 0.76 ± 0.40 m/s for drag and
+0.41 ± 0.06 m/s for lift, but those gaits roll 50 to 110 degrees RMS and keep a
+flipper above the water 31 to 53 % of the time — they row across the surface. This
+model has no free-surface physics, no splash and no wave drag, so those speeds are
+outside what it can predict. None of the constrained winners ever lifts a flipper out
+of the water. The limits do more than make the robot swim straight: they keep the
+search inside the model's range of validity.
+
+So for the claim that the optimal stroke is lift-based: the mechanism holds up — given
+the physics to use lift, the optimizer uses it every time, and a paddling gait
+optimized without lift falls apart once lift exists. Faster or more efficient is not
+shown. The next experiment is cost of transport at matched speed, and a calibrated `cl`
+for the real flipper.
 
 Links are matched to coefficients by **name pattern** in `config.json`, so a new robot
 needs no code change — just a rule like
@@ -243,11 +284,26 @@ q_i(t) = offset_i + sum_h  A_{i,h} * sin(2*pi*h*f*t + phi_{i,h})       h = 1, 2
 plus a duty-cycle phase warp that lets the power stroke occupy a different fraction of
 the cycle than the recovery stroke.
 
-**The second harmonic is not optional.** With a first harmonic only, two legs driven in
-antiphase produce exactly opposite thrust, all four legs cancel, and net thrust is
-identically zero. A second harmonic is invariant under a phase shift of pi, which is
-the mathematical counterpart of the real robot's passive flipper feathering — spread on
-the power stroke, furl on recovery. It is the prerequisite for any net thrust at all.
+**What the second harmonic is for.** It is invariant under a phase shift of pi, which
+makes it the natural way to express flipper feathering — spread on the power stroke,
+furl on recovery — the way a passive flipper does on the real robot.
+
+An earlier version of this README claimed the second harmonic was the prerequisite for
+any net thrust: with one harmonic, antiphase legs would push exactly opposite and
+cancel. **That is wrong for this model, and was never tested.** The cancellation
+argument only holds for strictly reciprocal motion. toy_quad drives three joints per
+leg with independent phases, so even one harmonic sweeps the leg non-reciprocally.
+Measured, 1600 evaluations each:
+
+| harmonics | duty cycle | speed | straight and level |
+|---|---|---|---|
+| 1 | fixed at 50 %, a pure sinusoid | 0.156 m/s | roll 10.2°, just over |
+| 1 | free, the search chose 26 % | 0.296 m/s | yes |
+
+A fast power stroke with a slow recovery produces thrust on its own, because drag grows
+with the square of speed. Whether a second harmonic is *necessary* depends on the leg:
+it may well be for a leg with one actuated joint and a passive flipper, which is worth
+testing on BODY2 rather than assuming.
 
 Any parameter group can be frozen, from the panel or the config file.
 
@@ -260,23 +316,33 @@ evolution strategy, not reinforcement learning** — it optimizes the parameters
 fixed-form trajectory, not a state-feedback policy.
 
 ```
-fitness = speed
-        - w_yaw      * yaw_rate     (rad/s)
-        - w_energy   * mean_power   (W)
-        - w_attitude * attitude     (rad, RMS roll + RMS pitch)
+fitness = speed in body lengths/s
+        - sum over heading, roll, pitch of  max(0, RMS - limit) / limit
+        - w_energy * mean power
 ```
 
-The attitude term exists because without it the optimizer rolls the hull over to get a
-faster stroke — nothing in the score said it may not, so it did. Setting
-`w_attitude = 0` restores that behaviour if you want to see it.
+**Straight and level are limits, not weights.** Inside every limit a gait is judged on
+speed alone. Each 100 % of excess over a limit costs one body length per second, which
+is more than any gait here swims, so an out-of-limit gait cannot buy its way back with
+speed. The defaults are 10 degrees RMS heading, 10 roll and 15 pitch; paddling rocks
+the body, so pitch is looser. Measuring speed in body lengths keeps the scale the same
+for any robot.
 
-The weights are a ruler, not a result. Fitness values are not comparable across
-different weight settings, so report the physical quantities — m/s, body lengths/s,
-degrees, watts — never the fitness number.
+An earlier version used additive weights, `speed - w_yaw*yaw_rate - w_attitude*...`.
+Weights like that only work at the speed scale they were tuned for. Once the model was
+fixed and the legs could really move, speed swamped them and the best gait rolled 42
+degrees and veered 44.
 
-Convergence means the fitness curve flattens **and** the step size sigma shrinks.
-Re-running with a different seed should land nearby; if it does not, the budget was too
-small.
+The objective is a ruler, not a result. Fitness values are not comparable across
+different settings, so report the physical quantities — m/s, body lengths/s, degrees,
+watts — never the fitness number.
+
+**Budget.** The gait space has 35 dimensions and is strongly multimodal. At 250
+evaluations CMA-ES has barely started; even at 4000 with a population of 16 the best
+gait is still improving slowly. Treat any single run as a lower bound, and compare
+conditions over several seeds, as `tools/compare_lift.py` does, rather than trusting
+one number. Convergence means the fitness curve flattens **and** the step size sigma
+shrinks.
 
 ---
 
@@ -306,49 +372,46 @@ imports as an open tree and produces no thrust; close it manually with MuJoCo
 
 ## Status
 
-Validated end to end on `toy_quad`. Runs of `python optimize.py config.json 250`,
-seed 1, MuJoCo 3.14, 250 rollouts in about two minutes on a laptop CPU. The two
-right-hand columns differ only in `w_attitude`:
+Validated end to end on `toy_quad`: `python optimize.py config.json`, 4000 rollouts,
+population 16, MuJoCo 3.14, about five minutes on 16 cores.
 
-| | hand-built | `w_attitude = 0` | `w_attitude = 0.05` |
-|---|---|---|---|
-| forward speed | 0.025 m/s | 0.084 m/s | 0.073 m/s |
-| body lengths per second | 0.11 | 0.37 | 0.32 |
-| roll amplitude | 0.6 deg | **62 deg** | 22 deg |
-| pitch amplitude | 19 deg | 38 deg | 39 deg |
-| yaw drift over 8 s | 0.2 deg | 4.7 deg | 19 deg |
-| mean mechanical power | 70 W | **426 W** | 146 W |
+| | hand-built | optimized, best of 3 seeds |
+|---|---|---|
+| forward speed | 0.092 m/s | **0.336 m/s** |
+| body lengths per second | 0.38 | **1.41** |
+| RMS heading / roll / pitch | 3.5 / 1.9 / **26.7** deg | 7.1 / 6.7 / 9.1 deg |
+| mean mechanical power | 8.4 W | 9.2 W |
+| stroke frequency | 1.2 Hz | 1.73 Hz |
 
-Around a third of the rollouts diverge and are rejected by the speed guard, which is
-normal for a first pass over a 35-dimensional space.
+**How reliable is one run?** Not very, yet. Three seeds with identical settings reached
+0.175, 0.336 and 0.311 m/s, all inside the limits. The gait space is strongly
+multimodal and a single CMA-ES run at this budget can settle in a clearly worse
+optimum. Run several seeds and keep the best, or report the spread; any one number is a
+lower bound on what the model allows.
 
-**The middle column is why the attitude term exists.** With `w_attitude = 0` nothing in
-the score forbids rolling the hull, so the optimizer rolled it 62 degrees and spent
-426 W to go 15 % faster. Those attitude figures were already computed every rollout;
-they simply did not enter the objective.
+Everything is deterministic. The same seed reproduces a run bit for bit, the panel and
+the command line reach identical results, and a parallel search returns exactly what a
+serial one would; the test suite checks all three.
 
-**The right-hand column is an improvement, not a fix.** Roll and power drop to about a
-third for a 13 % speed cost, but pitch is unchanged and yaw drift got worse — the
-search moved to a different local optimum. If you need level *and* straight, raise
-`w_attitude` further or penalize pitch separately, and state the weights you used
-whenever you report a number.
+Coefficients are literature values and `cl` is a textbook flat-plate figure.
+Experimental calibration against the physical robot — coast-down, static draft,
+pendulum decay, biped paddling — is the next step, and is what the accuracy ultimately
+rests on, not the choice of simulator.
 
-That is the intended use of this tool. It makes the objective's blind spots visible
-instead of hiding them behind three hand-picked gaits.
+### Correction
 
-Rollouts are deterministic: identical parameters reproduce a result exactly, which the
-replay path checks. The panel and the command line reach identical results from
-identical settings, which is also checked.
-
-Coefficients are currently literature values. Experimental calibration against the
-physical robot — coast-down, static draft, pendulum decay, biped paddling — is the next
-step, and is what the accuracy ultimately rests on, not the choice of simulator.
+Numbers published in this README before September 2026 are withdrawn. They came from a
+model whose joint limits were read in degrees instead of radians: every leg was pinned
+to ±1.3 degrees, and the actuators spent about nine tenths of their power fighting the
+limits. The same hand-built gait went from 0.025 to 0.092 m/s once fixed. The drag
+versus lift comparison was rerun from scratch on the corrected model, with several
+seeds, and the section above replaces the earlier one.
 
 ## Regenerating the images
 
 ```bash
 python tools/render_media.py --sim              # both gait clips, offscreen
-python tools/render_media.py --panel --run 250  # real search, then screenshot
+python tools/render_media.py --panel --run 4000 --seed 2   # real search, then screenshot
 ```
 
 The simulation frames render offscreen, so they need no visible window and come out the

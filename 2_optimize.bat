@@ -2,9 +2,9 @@
 chcp 65001 >nul
 set PYTHONIOENCODING=utf-8
 cd /d "%~dp0"
-title 2. CMA-ES optimization (~3 min)
+title 2. CMA-ES optimization (budget from config.json)
 echo ============================================================
-echo   2. CMA-ES optimization (~3 min)
+echo   2. CMA-ES optimization (budget from config.json)
 echo ============================================================
 echo.
 if exist "..\mjenv\Scripts\activate.bat" (
@@ -23,7 +23,7 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-python optimize.py config.json 250
+python optimize.py config.json
 echo.
 echo ============================================================
 echo   Finished. Press any key to close.

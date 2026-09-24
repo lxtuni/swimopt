@@ -7,7 +7,9 @@ Usage:
     python tools/render_media.py              # both gaits, then the panel
     python tools/render_media.py --sim        # simulation media only
     python tools/render_media.py --panel      # control panel screenshot only
-    python tools/render_media.py --panel --run 250   # run a real search, then capture
+    python tools/render_media.py --panel --run 4000  # run a real search, then capture
+    python tools/render_media.py --gait PATH/best.json --stem NAME [--lift]
+                                              # one extra clip from any result file
 
 Both gaits are rendered from the same camera so the two clips can be compared
 directly: the hand-built demo gait and whatever is in results/best.json.
@@ -51,8 +53,11 @@ def _camera(data, trunk_id, body_len):
     return cam
 
 
-def render_sim(use_demo=False, stem=None):
+def render_sim(use_demo=False, stem=None, best_path=None, lift=False):
+    """Render one gait. best_path picks a result file; lift renders under lift physics,
+    which a gait optimized with hydro.lift on must be, to look the way it scored."""
     cfg = load_cfg(os.path.join(ROOT, "config.json"))
+    cfg["hydro"]["lift"] = bool(lift)
     os.chdir(ROOT)                      # model and result paths in the config are relative
     sw = Swimmer(cfg["model"], cfg)
 
@@ -60,13 +65,13 @@ def render_sim(use_demo=False, stem=None):
         x, label = view_mod.demo_params(sw.gait), "demo gait"
         stem = stem or "gait_demo"
     else:
-        x, label = view_mod.load_gait(sw, ["config.json"])
+        x, label = view_mod.load_gait(sw, ["config.json", best_path or "results/best.json"])
         stem = stem or "gait_optimized"
     x = sw.gait.expand(x)
     r = sw.rollout(x)
-    print(f"[sim] {label}: speed {r['speed']:+.4f} m/s, {r['bl_s']:.3f} BL/s, "
-          f"yaw {r['yaw']:.1f} deg, pitch {r['pitch_amp']:.1f} deg, "
-          f"roll {r['roll_amp']:.1f} deg, {r['power']:.1f} W")
+    print(f"[sim] {label}{' (lift physics)' if lift else ''}: speed {r['speed']:+.4f} m/s, "
+          f"{r['bl_s']:.3f} BL/s, RMS heading {r['heading_rms']:.1f}, roll "
+          f"{r['roll_rms']:.1f}, pitch {r['pitch_rms']:.1f} deg, {r['power']:.2f} W")
 
     # Enlarge the offscreen framebuffer before the renderer is created.
     model = sw.model
@@ -117,7 +122,7 @@ def render_sim(use_demo=False, stem=None):
     print(f"[sim] wrote {os.path.relpath(gif_path, ROOT)} ({size_mb:.1f} MB)")
 
 
-def render_panel(budget=None):
+def render_panel(budget=None, seed=None):
     """Screenshot the real control panel. Needs an interactive desktop session.
 
     With `budget`, it first drives a real optimization through the panel, so the
@@ -139,6 +144,9 @@ def render_panel(budget=None):
     if budget:
         app.e_budget.delete(0, "end")
         app.e_budget.insert(0, str(budget))
+        if seed is not None:
+            app.e_seed.delete(0, "end")
+            app.e_seed.insert(0, str(seed))
         app.cb_view.set(ui.VIEW_NONE)    # no viewer window to overlap the screenshot
         app._start()
         print(f"[panel] running {budget} evaluations through the panel ...")
@@ -170,13 +178,24 @@ def render_panel(budget=None):
     print(f"[panel] wrote {os.path.relpath(out, ROOT)} ({img.width}x{img.height})")
 
 
+def _arg(args, name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
+    if "--gait" in args:
+        # One extra clip, e.g. a study result:
+        #   --gait results_cmp/lift_limits_s2/best.json --stem gait_lift --lift
+        render_sim(best_path=_arg(args, "--gait"), stem=_arg(args, "--stem", "gait_extra"),
+                   lift="--lift" in args)
+        sys.exit(0)
     do_sim = "--panel" not in args
     do_panel = "--sim" not in args
-    budget = int(args[args.index("--run") + 1]) if "--run" in args else None
+    budget = int(_arg(args, "--run")) if "--run" in args else None
+    seed = int(_arg(args, "--seed")) if "--seed" in args else None
     if do_sim:
         render_sim(use_demo=True)
         render_sim(use_demo=False)
     if do_panel:
-        render_panel(budget)
+        render_panel(budget, seed)

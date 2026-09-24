@@ -106,6 +106,39 @@ def test_a_welded_robot_is_reported(tmp_path, cfg):
     assert "NO free joint" in sw.info()
 
 
+def test_inside_the_limits_only_speed_counts(cfg):
+    sw = make_swimmer(cfg, limits={"heading_deg": 10, "roll_deg": 10, "pitch_deg": 15})
+    r = sw.score(dist=0.5, yaw_drift=0.0, energy=0.0, roll_rms=math.radians(9),
+                 pitch_rms=math.radians(14), heading_rms=math.radians(9), duration=5.0)
+    assert r["feasible"] and r["penalty"] == 0.0
+    assert r["fitness"] == pytest.approx(0.5 / 5.0 / sw.body_len)
+
+
+def test_excess_over_a_limit_costs_one_body_length_per_100_percent(cfg):
+    sw = make_swimmer(cfg, limits={"heading_deg": 10, "roll_deg": 10, "pitch_deg": 15})
+    r = sw.score(dist=0.5, yaw_drift=0.0, energy=0.0, roll_rms=math.radians(15),
+                 pitch_rms=0.0, heading_rms=math.radians(20), duration=5.0)
+    assert not r["feasible"]
+    assert r["penalty"] == pytest.approx(0.5 + 1.0)          # roll +50 %, heading +100 %
+    assert r["fitness"] == pytest.approx(r["bl_s"] - 1.5)
+
+
+def test_a_feasible_gait_beats_a_faster_infeasible_one(cfg):
+    """The point of limits over weights: speed cannot buy its way out of them."""
+    sw = make_swimmer(cfg)
+    slow_ok = sw.score(dist=0.3, yaw_drift=0, energy=0, roll_rms=0.05, pitch_rms=0.05,
+                       heading_rms=0.05, duration=8.0)
+    fast_bad = sw.score(dist=3.0, yaw_drift=0, energy=0, roll_rms=0.7, pitch_rms=0.2,
+                        heading_rms=0.8, duration=8.0)
+    assert slow_ok["fitness"] > fast_bad["fitness"]
+
+
+def test_old_weight_keys_are_flagged(cfg):
+    c = copy.deepcopy(cfg)
+    c["w_yaw"] = 0.3
+    assert "no longer used" in make_swimmer(c).info()
+
+
 def test_jsonc_keeps_slashes_inside_strings():
     text = '{"url": "http://a/b", // comment\n "n": 1 /* block */}'
     assert json.loads(strip_jsonc(text)) == {"url": "http://a/b", "n": 1}

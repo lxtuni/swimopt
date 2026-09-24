@@ -26,8 +26,8 @@ import mujoco
 
 from simulate import Swimmer, load_cfg, record_best, atomic_json_dump
 
-LOG_FIELDS = ["eval", "gen", "fitness", "speed", "yaw", "roll", "pitch", "power",
-              "thrust_lift", "thrust_drag", "ok"]
+LOG_FIELDS = ["eval", "gen", "fitness", "speed", "heading_rms", "roll_rms", "pitch_rms",
+              "power", "thrust_lift", "thrust_drag", "feasible", "ok"]
 
 # ---------- worker processes ----------
 _WORKER = None          # this process's own Swimmer; MuJoCo models are not shareable
@@ -71,8 +71,10 @@ def cma_options(cfg, budget):
 
 def _candidate_line(n, r, flag):
     # The control panel parses this line; keep the "#<n>" and "fitness" fields.
-    return (f"  #{n:4d}  speed {r['speed']:+.4f} m/s  yaw {r['yaw']:5.1f} deg  "
-            f"roll {r['roll_amp']:5.1f} deg  fitness {r['fitness']:+.4f}{flag}")
+    over = "" if r["feasible"] or not r["ok"] else "  over limit"
+    return (f"  #{n:4d}  speed {r['speed']:+.4f} m/s  RMS head {r['heading_rms']:4.1f} "
+            f"roll {r['roll_rms']:4.1f} pitch {r['pitch_rms']:4.1f} deg  "
+            f"fitness {r['fitness']:+.4f}{over}{flag}")
 
 
 def search(sw, cfg, budget, pool=None, should_show=None, render=None, on_record=None):
@@ -128,10 +130,10 @@ def search(sw, cfg, budget, pool=None, should_show=None, render=None, on_record=
                     break
                 n_eval += 1
                 wr.writerow([n_eval, gen, f"{r['fitness']:.5f}", f"{r['speed']:.5f}",
-                             f"{r['yaw']:.2f}", f"{r['roll_amp']:.2f}",
-                             f"{r['pitch_amp']:.2f}", f"{r['power']:.3f}",
+                             f"{r['heading_rms']:.2f}", f"{r['roll_rms']:.2f}",
+                             f"{r['pitch_rms']:.2f}", f"{r['power']:.3f}",
                              f"{r['thrust_lift']:.5f}", f"{r['thrust_drag']:.5f}",
-                             int(r["ok"])] + [f"{v:.6f}" for v in x])
+                             int(r["feasible"]), int(r["ok"])] + [f"{v:.6f}" for v in x])
                 flag = ""
                 if r["fitness"] > best["fitness"]:
                     best = record_best(r, x, sw.gait)
@@ -149,7 +151,8 @@ def search(sw, cfg, budget, pool=None, should_show=None, render=None, on_record=
             hist.append(best["fitness"])
             sigmas.append(float(es.sigma))
             print(f"--- gen {gen:3d} | evals {n_eval:4d} | best {best['fitness']:+.4f} "
-                  f"(speed {best['speed']:.4f} m/s, yaw {best['yaw']:.1f} deg) "
+                  f"(speed {best['speed']:.4f} m/s, "
+                  f"{'within limits' if best['feasible'] else 'over limit'}) "
                   f"| sigma {es.sigma:.4f} | {time.time()-t0:.0f}s ---", flush=True)
     finally:
         log.close()
@@ -162,9 +165,10 @@ def search(sw, cfg, budget, pool=None, should_show=None, render=None, on_record=
 def print_summary(sw, best, n_eval, outdir):
     print("\n=== best gait ===")
     print(sw.gait.describe(best["x"]))
-    print(f"speed {best['speed']:.4f} m/s ({best['bl_s']:.2f} BL/s) | "
-          f"yaw {best['yaw']:.1f} deg | roll {best['roll']:.1f} deg | "
-          f"pitch {best['pitch']:.1f} deg | {best['power']:.1f} W | "
+    print(f"speed {best['speed']:.4f} m/s ({best['bl_s']:.2f} BL/s) | RMS heading "
+          f"{best['heading_rms']:.1f}, roll {best['roll_rms']:.1f}, pitch "
+          f"{best['pitch_rms']:.1f} deg | {best['power']:.1f} W | "
+          f"{'within limits' if best['feasible'] else 'OVER LIMIT'} | "
           f"{n_eval} rollouts | {best.get('elapsed_s', 0):.0f}s")
     print(f"saved to {outdir}/best.json, log.csv, convergence.json, run_config.json")
 

@@ -17,6 +17,9 @@ import mujoco
 from hydro import HydroModel
 from gait import SineGait
 
+# RMS over the scored window, in degrees. See Swimmer.__init__ and score().
+DEFAULT_LIMITS = {"heading_deg": 10.0, "roll_deg": 10.0, "pitch_deg": 15.0}
+
 
 class Swimmer:
     def __init__(self, xml_path, cfg):
@@ -35,11 +38,15 @@ class Swimmer:
         self.trunk = cfg.get("trunk_body", None)
         self.trunk_id = (mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, self.trunk)
                          if self.trunk else 1)
-        self.w_yaw = float(cfg.get("w_yaw", 0.3))           # heading penalty weight
-        self.w_energy = float(cfg.get("w_energy", 0.0))     # 0 means speed only
-        # Attitude penalty. Without it nothing stops the optimizer from rolling the
-        # hull over to get a faster stroke, which it will do given the chance.
-        self.w_attitude = float(cfg.get("w_attitude", 0.05))
+        # Straight and level are limits, not weights. An additive weight only works at
+        # the speed scale it was tuned for: once the legs could really move, speed
+        # swamped the old w_yaw/w_attitude terms and the optimizer happily rolled and
+        # veered. Within a limit only speed counts; beyond it the score drops by one
+        # body length per second for every 100 % of excess.
+        lim = dict(DEFAULT_LIMITS, **cfg.get("limits", {}))
+        self.limits = {k: float(lim[f"{k}_deg"]) for k in ("heading", "roll", "pitch")}
+        self.w_energy = float(cfg.get("w_energy", 0.0))     # per watt, in BL/s
+        self.legacy_weights = [k for k in ("w_yaw", "w_attitude") if k in cfg]
         self.body_len = float(cfg.get("body_length", 0.0))  # metres, for body-lengths/s
         if self.body_len <= 0:
             self.body_len = self._estimate_body_length()
@@ -130,7 +137,8 @@ class Swimmer:
         xmat, cvel = d.xmat[tid], d.cvel[tid]
         af, av, qvel = d.actuator_force, d.actuator_velocity, d.qvel
         energy = 0.0
-        pitch_max = roll_max = pitch_sq = roll_sq = 0.0
+        pitch_max = roll_max = pitch_sq = roll_sq = head_sq = 0.0
+        two_pi = 2.0 * math.pi
         for k in range(n_steps):
             d.ctrl[:] = self.gait.ctrl(p, k * dt)
             self.hydro.apply(d)
@@ -148,6 +156,9 @@ class Swimmer:
                 roll_max = roll
             pitch_sq += pitch * pitch
             roll_sq += roll * roll
+            # heading deviation from the start, wrapped to (-pi, pi]
+            dh = (math.atan2(xmat[3], xmat[0]) - yaw0 + math.pi) % two_pi - math.pi
+            head_sq += dh * dh
             if record and k % 50 == 0:
                 traj.append([k * dt, *d.xpos[tid], np.degrees(self._yaw() - yaw0)])
             if on_step is not None and on_step(k, "run") is False:
@@ -161,6 +172,7 @@ class Swimmer:
         n = max(n_steps, 1)
         res = self.score(dist=dist, yaw_drift=yaw_drift, energy=energy,
                          roll_rms=math.sqrt(roll_sq / n), pitch_rms=math.sqrt(pitch_sq / n),
+                         heading_rms=math.sqrt(head_sq / n),
                          roll_max=roll_max, pitch_max=pitch_max, traj=traj,
                          duration=duration)
         res.update(self.thrust_split(fwd))
@@ -182,30 +194,38 @@ class Swimmer:
                     lift_share=float(abs(lift) / total) if total > 1e-12 else 0.0)
 
     # ---------- scoring ----------
-    def score(self, dist, yaw_drift, energy, roll_rms, pitch_rms,
+    def score(self, dist, yaw_drift, energy, roll_rms, pitch_rms, heading_rms=0.0,
               roll_max=0.0, pitch_max=0.0, traj=None, duration=None):
         """Turn one rollout's raw measurements into a fitness and a result dict.
 
+        fitness = speed in body lengths/s
+                  - sum over heading, roll, pitch of  max(0, rms - limit) / limit
+                  - w_energy * mean power
+
+        Inside every limit a gait is judged on speed alone; each 100 % of excess
+        costs one body length per second, more than any gait here can swim, so an
+        infeasible gait never beats a feasible one by much. Measuring in body lengths
+        keeps the scale the same for any robot.
+
         `dist` is metres along the initial heading, `yaw_drift` degrees, `energy`
-        joules, the attitude terms radians, `duration` seconds (default sim_time).
+        joules, the RMS terms radians, `duration` seconds (default sim_time).
         """
         T = self.T if duration is None else float(duration)
         speed = dist / T
+        bl_s = speed / self.body_len
         power = energy / T                       # mean watts, independent of sim length
-        yaw_rate = np.radians(yaw_drift) / T
-        attitude = float(roll_rms + pitch_rms)   # radians, RMS over the rollout
-        fit = (speed
-               - self.w_yaw * yaw_rate
-               - self.w_energy * power
-               - self.w_attitude * attitude)
+        rms = {"heading": math.degrees(heading_rms), "roll": math.degrees(roll_rms),
+               "pitch": math.degrees(pitch_rms)}
+        excess = {k: max(0.0, rms[k] - self.limits[k]) / self.limits[k] for k in rms}
+        penalty = sum(excess.values())
+        fit = bl_s - penalty - self.w_energy * power
         return dict(ok=True, fitness=float(fit), dist=float(dist), speed=float(speed),
-                    bl_s=float(speed / self.body_len),
-                    yaw=float(yaw_drift),
+                    bl_s=float(bl_s), yaw=float(yaw_drift),
+                    heading_rms=rms["heading"], roll_rms=rms["roll"],
+                    pitch_rms=rms["pitch"],
                     pitch_amp=float(np.degrees(pitch_max)),
                     roll_amp=float(np.degrees(roll_max)),
-                    pitch_rms=float(np.degrees(pitch_rms)),
-                    roll_rms=float(np.degrees(roll_rms)),
-                    attitude=attitude,
+                    penalty=float(penalty), feasible=penalty == 0.0,
                     energy=float(energy), power=float(power), duration=T,
                     thrust_drag=0.0, thrust_lift=0.0, lift_share=0.0,
                     traj=traj if traj is not None else [])
@@ -213,8 +233,9 @@ class Swimmer:
     def diverged(self, traj=None):
         """The result of a rollout that hit the speed guard."""
         return dict(ok=False, fitness=-1e3, dist=0.0, speed=0.0, bl_s=0.0, yaw=0.0,
-                    pitch_amp=0.0, roll_amp=0.0, pitch_rms=0.0, roll_rms=0.0,
-                    attitude=0.0, energy=0.0, power=0.0, duration=0.0,
+                    heading_rms=0.0, roll_rms=0.0, pitch_rms=0.0,
+                    pitch_amp=0.0, roll_amp=0.0, penalty=0.0, feasible=False,
+                    energy=0.0, power=0.0, duration=0.0,
                     thrust_drag=0.0, thrust_lift=0.0, lift_share=0.0,
                     traj=traj if traj is not None else [])
 
@@ -242,9 +263,13 @@ class Swimmer:
             self.gait.opt_summary(),
             f"[sim] dt={self.model.opt.timestep*1000:.1f}ms duration={self.T}s"
             + (" (rounded up to whole strokes)" if self.whole_strokes else ""),
-            f"[objective] fitness = speed - {self.w_yaw} x yaw rate "
-            f"- {self.w_energy} x mean power - {self.w_attitude} x attitude",
+            f"[objective] fitness = body lengths/s - excess over limits "
+            f"(RMS heading {self.limits['heading']:g}, roll {self.limits['roll']:g}, "
+            f"pitch {self.limits['pitch']:g} deg) - {self.w_energy} x mean power",
         ]
+        if self.legacy_weights:
+            lines.append(f"[!] {', '.join(self.legacy_weights)} in the config are no "
+                         f"longer used; straightness and level are set by 'limits'")
         if not self.free_base:
             lines.append("[!] this model has NO free joint: the robot is welded to the "
                          "world and cannot swim. Re-import it with import_model.py.")
@@ -261,6 +286,8 @@ def record_best(result, x, gait):
     """
     return dict(fitness=result["fitness"], speed=result["speed"], bl_s=result["bl_s"],
                 yaw=result["yaw"], roll=result["roll_amp"], pitch=result["pitch_amp"],
+                heading_rms=result["heading_rms"], roll_rms=result["roll_rms"],
+                pitch_rms=result["pitch_rms"], feasible=result["feasible"],
                 power=result["power"], duration=result["duration"],
                 thrust_lift=result["thrust_lift"], thrust_drag=result["thrust_drag"],
                 x=list(map(float, gait.expand(x))), dim=int(gait.dim),

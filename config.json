@@ -27,30 +27,36 @@
 
   // --------------------------------------------------------------------------
   //  3. Objective. This is what "swimming well" means.
-  //     fitness = forward speed
-  //             - w_yaw      * yaw rate        (rad/s)
-  //             - w_energy   * mean power      (W)
-  //             - w_attitude * attitude        (rad, RMS roll + RMS pitch)
+  //
+  //     fitness = speed in body lengths/s
+  //             - sum over heading, roll, pitch of max(0, RMS - limit) / limit
+  //             - w_energy * mean power (W)
+  //
+  //     Straight and level are LIMITS, not weights. Inside every limit a gait is
+  //     judged on speed alone; each 100 % of excess costs 1 body length/s, which is
+  //     more than any gait swims, so an out-of-limit gait cannot win on speed.
+  //     Additive weights only worked at the speed scale they were tuned for: once
+  //     the legs could really move, speed swamped them and the best gait rolled
+  //     42 deg and veered 44 deg.
   // --------------------------------------------------------------------------
-  "w_yaw":    0.3,   // heading penalty. 0 = speed only, circling allowed;
-                     // 0.3 = stay roughly straight; 1.0 = strict
-  "w_energy": 0.0,   // power penalty. 0 = speed only;
-                     // 0.01-0.1 when optimizing cost of transport
-
-  // Attitude penalty: keeps the hull upright and level.
-  // Without it the optimizer rolls the body over to get a faster stroke, because
-  // nothing in the score says it may not. A measured example: at 0 this search
-  // returned 0.084 m/s while rolling 62 deg and drawing 426 W.
-  // 0   = attitude ignored (the old behaviour)
-  // 0.05 = level swimming, mild cost in speed
-  // 0.2  = very flat, noticeably slower
-  "w_attitude": 0.05,
+  "limits": {
+    "heading_deg": 10,   // RMS heading deviation from the start. Straightness.
+    "roll_deg":    10,   // RMS roll. Keeps the hull upright.
+    "pitch_deg":   15    // RMS pitch. Paddling rocks the body, so this is looser.
+                         // Set any of these to 180 to switch that limit off.
+  },
+  "w_energy": 0.0,       // power penalty, in body lengths/s per watt. 0 = speed only;
+                         // raise it when optimizing cost of transport
 
   // --------------------------------------------------------------------------
   //  4. Search budget.
   // --------------------------------------------------------------------------
-  "budget":  250,      // total rollouts (the second command-line argument wins)
-  "popsize": 10,       // CMA-ES candidates per generation; raise to 12-16 in high dims
+  "budget":  4000,     // total rollouts (the second command-line argument wins).
+                       // The 35-dim gait space is strongly multimodal: 250 barely
+                       // starts the search, and even 4000 is still improving slowly
+  "popsize": 16,       // CMA-ES candidates per generation. A larger population makes
+                       // CMA-ES more robust on multimodal problems like this one, and
+                       // 16 keeps every core of a 16-core machine busy
   "sigma0":  0.25,     // initial search radius in the normalized [0,1] space.
                        // 0.2-0.4 is usual: too large wanders, too small gets stuck
   "seed":    1,        // random seed. A different number is an independent search,
@@ -122,8 +128,10 @@
   //               + H * (amplitude groups + actuators) + offset groups
   // --------------------------------------------------------------------------
   "gait": {
-    "harmonics":    2,           // 2 is required for feathering, and for any net
-                                 // thrust at all; 1 is only viable with passive flippers
+    "harmonics":    2,           // 2 lets the flipper feather (spread, then furl).
+                                 // NOT required for net thrust on toy_quad: 1 still
+                                 // swims 0.16-0.30 m/s. May matter for a leg with one
+                                 // actuated joint; test it rather than assume
     "duty_range":   [0.25, 0.75],// power-stroke duty range. The paddling literature
                                  // compares 25 / 33 / 50 %
     "freq_range":   [0.2, 2.5],  // stroke frequency range, Hz. Keep it within what the

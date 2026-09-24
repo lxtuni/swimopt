@@ -40,7 +40,8 @@ def test_outputs_carry_provenance(cfg, tmp_path):
     assert run_cfg["config"]["seed"] == 7 and "mujoco" in run_cfg
     assert len(conv["history"]) == len(conv["sigma"]) == 3
     header = log.splitlines()[0].split(",")
-    assert header[:11] == optimize.LOG_FIELDS
+    assert header[:len(optimize.LOG_FIELDS)] == optimize.LOG_FIELDS
+    assert "feasible" in best and "heading_rms" in best
 
 
 def test_seed_zero_warns(capsys):

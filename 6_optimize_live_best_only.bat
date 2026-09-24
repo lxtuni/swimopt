@@ -16,7 +16,7 @@ if exist "..\mjenv\Scripts\activate.bat" (
 )
 python -c "import mujoco" 2>nul
 if errorlevel 1 (echo [X] mujoco not installed. Run the "0_" setup .bat first. & pause & exit /b 1)
-python optimize_view.py config.json 250 --best
+python optimize_view.py config.json --best
 echo.
 echo   Finished. Press any key to close.
 pause >nul
