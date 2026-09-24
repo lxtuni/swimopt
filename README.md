@@ -150,18 +150,83 @@ F = rho*g*V*f            buoyancy
   absorbed into experimentally calibrated coefficients. Same modelling level as the
   beaver-robot literature this builds on.
 
-> **This model is resistive only.** Every force above is anti-parallel to a component
-> of the relative flow. There is no circulatory lift term — no `Cl(alpha)`, no lift
-> slope, no stall. The anisotropic `Cd` does give a flat plate at incidence a force
-> component across the freestream, which is the usual crossflow approximation, but it
-> is not foil lift and it systematically under-rewards it.
->
-> The consequence matters when interpreting results: **a lift-based, foil-like gait
-> cannot win a search in this simulator, because the mechanism that would make it win
-> is not implemented.** Whatever the optimizer returns here is the best *drag-based*
-> paddling stroke. If you need to compare resistive against lift-based propulsion, a
-> `Cl(alpha)` term has to be added first, and both mechanisms then compete on equal
-> terms.
+### Drag-based and lift-based propulsion
+
+The terms above are all **resistive**: every one is anti-parallel to a component of the
+relative flow. A swimmer built only from them can only push water backwards — it
+paddles. Real flippers also work as foils, generating force *across* the flow, and that
+mechanism needs its own term.
+
+`hydro.lift` adds it, and is **off by default** so that every earlier result stays
+reproducible:
+
+```
+Cl(alpha) = cl * sin(2*alpha)      alpha = angle between the flow and the plate's plane
+L = 0.5*rho*Cl*A*|v|^2             perpendicular to the flow, in the (flow, normal) plane
+```
+
+This is the post-stall flat-plate model, which is the right level of description for a
+paddle sweeping through large angles. The plate normal is taken to be the axis with the
+largest `Cd`, so no extra geometry description is needed. Each link opts in with a `cl`
+in its rule; anything not plate-like keeps `cl: 0`.
+
+Why it changes conclusions: at small angle of attack lift grows like `alpha` while the
+resistive terms grow like `alpha^2`. A fast, shallow, feathered sweep therefore
+produces almost nothing in the resistive model and a great deal with lift enabled.
+
+> **With `lift: false`, a lift-based gait cannot win a search here, because the
+> mechanism that would let it win is not implemented.** A resistive-only result is a
+> statement about drag-based paddling, not about optimal swimming in general. Say which
+> setting produced any number you report.
+
+Every rollout reports `lift_share`, the fraction of forward impulse produced by the
+lift term, so "is this gait lift-based or drag-based" is a measurement rather than an
+impression. To run the comparison end to end:
+
+```bash
+python tools/compare_lift.py 250
+```
+
+It runs two identical searches differing only in `hydro.lift`, then scores each winner
+under *both* physics models. The cross-evaluation is the part that matters: it
+separates "lift changes which gait is best" from "lift changes what every gait scores".
+
+**`cl` is not calibrated.** 1.1 is the textbook flat-plate value. Results from it are
+qualitative until the real flipper is measured.
+
+#### What the comparison actually found
+
+`toy_quad`, 250 evaluations per cell, seed 1. The attitude penalty is varied alongside
+the physics because lift on a flipper necessarily produces a moment, so penalizing
+attitude penalizes lift indirectly. Reporting only one attitude weight hides that.
+
+| search | speed m/s | freq Hz | roll | power W |
+|---|---|---|---|---|
+| drag, no attitude penalty | 0.084 | 2.29 | 62 deg | 426 |
+| drag, attitude penalty | 0.073 | 0.88 | 22 deg | 146 |
+| lift, no attitude penalty | 0.080 | 0.71 | 141 deg | **71** |
+| lift, attitude penalty | 0.025 | 0.24 | 9 deg | **31** |
+
+The efficiency signature of lift-based propulsion is clearly there: the third row
+reaches 95 % of the fastest resistive gait's speed on **17 % of the power**. In that
+gait lift supplies +0.71 N*s of forward impulse while the resistive terms supply
+-0.62 N*s — lift does all the pushing and drag is pure loss, which is what lift-based
+propulsion means.
+
+What it did *not* do is emerge as the best gait overall. With attitude penalized, the
+lift-aware search collapses to a slow 0.24 Hz stroke. That frequency sits on the lower
+bound of `freq_range`, so the bound chose it, not the physics.
+
+Cross-evaluation shows the resistive results are fragile: re-scored under lift physics,
+both resistive winners roll to 180 degrees — fully inverted — and one ends up moving
+backwards. A gait optimized without lift is not merely suboptimal once lift exists, it
+is unstable.
+
+**Do not read this as settling drag versus lift.** `cl` is uncalibrated, it is one seed
+at one budget, a frequency bound is active, and the objective has no term for the
+efficiency that lift is good at. Testing "lift-based is optimal" properly means setting
+`w_energy` above zero, so the objective measures cost of transport, which is the
+quantity the claim is about.
 
 Links are matched to coefficients by **name pattern** in `config.json`, so a new robot
 needs no code change — just a rule like

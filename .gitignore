@@ -18,9 +18,11 @@ robots/*.obj
 
 # ---- Run outputs ----
 results/
+results_*/
 *.log
 MUJOCO_LOG.TXT
 _ui_run.json
+_cmp_*.json
 
 # ---- Personal notes, not part of the public repo ----
 PUSH_*.txt

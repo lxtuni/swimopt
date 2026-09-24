@@ -67,18 +67,40 @@
     "water_z": 0.0,      // water surface height in world z; put the robot near it
     "exclude": ["vis_"], // geoms whose name contains these are decorative, no forces
 
-    // Used when a geom matches none of the rules below.
-    "default": { "cd": [0.3, 0.3, 0.3], "ca": 0.2, "cv": 0.02 },
+    // Circulatory lift, off by default.
+    //
+    // With lift false the model is purely resistive: every force is anti-parallel to
+    // a component of the relative flow. A lift-based, foil-like gait then cannot win
+    // a search, because the mechanism that would let it win is not implemented.
+    // Anything published from a resistive-only run is a statement about drag-based
+    // paddling, not about optimal swimming in general.
+    //
+    // With lift true, every geom carrying a "cl" also gets a force perpendicular to
+    // its local flow, using the post-stall flat-plate model Cl(alpha) = cl*sin(2*alpha)
+    // where alpha is the angle between the flow and the plate's plane. The plate
+    // normal is taken to be the axis with the largest cd. At small alpha this grows
+    // like alpha while drag grows like alpha^2, which is the regime a sweeping foil
+    // works in.
+    //
+    // cl is NOT calibrated. 1.1 is the textbook flat-plate value. Treat any result
+    // from it as qualitative until you have measured the real flipper.
+    "lift": false,
+
+    // Used when a geom matches none of the rules below. cl defaults to 0: a link only
+    // generates lift if its rule says so.
+    "default": { "cd": [0.3, 0.3, 0.3], "ca": 0.2, "cv": 0.02, "cl": 0.0 },
 
     // Rules are matched against geom names in order; the first hit wins.
     //   cd = drag coefficient on each local axis. A large normal-to-the-face value
-    //        and a small edge-on value are what produce thrust.
+    //        and a small edge-on value are what produce drag-based thrust.
+    //   cl = flat-plate lift coefficient, used only when hydro.lift is true.
+    //        0 for anything that is not plate-like. ~1.1 for a flat plate.
     //   ca = added-mass coefficient (flat plate ~1.0, thin rod ~0.3, hull ~0.2)
     //   cv = linear viscous coefficient, which damps low-speed motion
     "rules": [
-      { "match": "flip",  "cd": [2.2, 0.10, 0.10], "ca": 1.0, "cv": 0.05 },  // flipper
-      { "match": "link",  "cd": [0.5, 0.50, 0.25], "ca": 0.3, "cv": 0.02 },  // leg link
-      { "match": "trunk", "cd": [0.9, 1.60, 1.80], "ca": 0.2, "cv": 0.10 }   // hull
+      { "match": "flip",  "cd": [2.2, 0.10, 0.10], "cl": 1.1, "ca": 1.0, "cv": 0.05 },  // flipper
+      { "match": "link",  "cd": [0.5, 0.50, 0.25], "cl": 0.0, "ca": 0.3, "cv": 0.02 },  // leg link
+      { "match": "trunk", "cd": [0.9, 1.60, 1.80], "cl": 0.0, "ca": 0.2, "cv": 0.10 }   // hull
       // For the BODY2 model, match on link numbers instead:
       // { "match": "2.4",  "cd": [2.2, 0.10, 0.10], "ca": 1.0, "cv": 0.05 },  // flipper
       // { "match": "2.",   "cd": [0.5, 0.50, 0.25], "ca": 0.3, "cv": 0.02 },  // lower links

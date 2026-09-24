@@ -49,6 +49,7 @@ def rollout_view(sw, x, viewer=None, realtime=False, render_every=8):
 
     p0 = d.xpos[sw.trunk_id].copy()
     yaw0 = sw._yaw()
+    sw.hydro.reset_impulse()
     energy, blew = 0.0, False
     roll_sq = pitch_sq = 0.0
     roll_max = pitch_max = 0.0
@@ -86,13 +87,16 @@ def rollout_view(sw, x, viewer=None, realtime=False, render_every=8):
 
     disp = d.xpos[sw.trunk_id].copy() - p0
     yaw_drift = abs(np.degrees(sw._wrap(sw._yaw() - yaw0)))
-    dist = float(disp[:2] @ sw._forward_dir(yaw0))
+    fwd = sw._forward_dir(yaw0)
+    dist = float(disp[:2] @ fwd)
     n_att = max(n_att, 1)
     # Scoring lives in Swimmer.score, so this loop cannot disagree with rollout().
-    return sw.score(dist=dist, yaw_drift=yaw_drift, energy=energy,
-                    roll_rms=np.sqrt(roll_sq / n_att),
-                    pitch_rms=np.sqrt(pitch_sq / n_att),
-                    roll_max=roll_max, pitch_max=pitch_max)
+    r = sw.score(dist=dist, yaw_drift=yaw_drift, energy=energy,
+                 roll_rms=np.sqrt(roll_sq / n_att),
+                 pitch_rms=np.sqrt(pitch_sq / n_att),
+                 roll_max=roll_max, pitch_max=pitch_max)
+    r.update(sw.thrust_split(fwd))
+    return r
 
 
 def parse_args(argv):

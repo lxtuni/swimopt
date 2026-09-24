@@ -83,6 +83,9 @@ class HydroModel:
         self.default = cfg.get("default", {"cd": [0.3, 0.3, 0.3], "ca": 0.2, "cv": 0.02})
         self.exclude = cfg.get("exclude", [])      # geoms whose name contains these are skipped
         self.cfg_mesh_fill = cfg.get("mesh_fill", 0.55)   # solid fill ratio of a mesh bbox
+        # Circulatory lift. Off by default: with lift disabled this model is purely
+        # resistive, which is what every result before this option was produced with.
+        self.lift_on = bool(cfg.get("lift", False))
         self.items = []                            # precomputed data per wetted geom
         self._scan()
         self._apply_added_mass()
@@ -118,9 +121,15 @@ class HydroModel:
                 size_eff = np.array(self.m.geom_size[gid], dtype=float)
             rule = self._match(name)
             ca = float(rule.get("ca", self.default["ca"]))
+            cd = np.array(rule.get("cd", self.default["cd"]), dtype=float)
+            # The surface behaves like a plate whose face is the axis with the largest
+            # drag coefficient. That axis is the plate normal used by the lift model.
+            face = int(np.argmax(cd))
             self.items.append(dict(
                 gid=gid, bid=bid, name=name, V=V, A=A,
-                cd=np.array(rule.get("cd", self.default["cd"]), dtype=float),
+                cd=cd,
+                cl=float(rule.get("cl", self.default.get("cl", 0.0))),
+                face=face,
                 ca=ca,
                 cv=float(rule.get("cv", self.default["cv"])),
                 gtype=(int(GT.mjGEOM_BOX) if gtype == GT.mjGEOM_MESH else int(gtype)),
@@ -159,6 +168,22 @@ class HydroModel:
             scale = (m0 + ma) / m0
             self.m.body_mass[bid] = m0 + ma
             self.m.body_inertia[bid] *= scale
+        self._refresh_subtree_mass()
+
+    def _refresh_subtree_mass(self):
+        """Recompute body_subtreemass after body_mass was written.
+
+        MuJoCo derives body_subtreemass when the model is compiled, and writing
+        body_mass afterwards leaves it stale. mj_subtreeVel divides the subtree
+        momentum by it, so anything reading subtree_linvel silently gets a velocity
+        scaled by the ratio of old to new mass.
+        """
+        sub = np.array(self.m.body_mass, dtype=float)
+        # MuJoCo guarantees a parent's index is lower than its children's, so one
+        # reverse pass accumulates every subtree.
+        for bid in range(self.m.nbody - 1, 0, -1):
+            sub[int(self.m.body_parentid[bid])] += sub[bid]
+        self.m.body_subtreemass[:] = sub
 
     def _vectorize(self):
         n = len(self.items)
@@ -173,7 +198,14 @@ class HydroModel:
         self.V = np.array([i["V"] for i in self.items])
         self.A = np.array([i["A"] for i in self.items])
         self.CD = np.array([i["cd"] for i in self.items])
+        self.CL = np.array([i["cl"] for i in self.items])
         self.CV = np.array([i["cv"] for i in self.items])
+        # Plate normal in the geom's local frame, and the area facing it.
+        face = np.array([i["face"] for i in self.items], dtype=int)
+        self.NRM = np.zeros((n, 3))
+        self.NRM[np.arange(n), face] = 1.0
+        self.A_face = self.A[np.arange(n), face]
+        self.has_lift = bool(self.lift_on and np.any(self.CL > 0))
         self.MA = np.array([i["ma"] for i in self.items])
         self.SZ = np.array([i["size"] for i in self.items])
         self.TY = np.array([int(i["gtype"]) for i in self.items])
@@ -183,6 +215,41 @@ class HydroModel:
         self.is_cap = (self.TY == int(GT.mjGEOM_CAPSULE)) | (self.TY == int(GT.mjGEOM_CYLINDER))
         self.is_ell = self.TY == int(GT.mjGEOM_ELLIPSOID)
         self._buoy_ma = self.MA * self.g
+        self.reset_impulse()
+
+    # ---------- thrust bookkeeping ----------
+    def reset_impulse(self):
+        """Zero the running impulse totals. Call once scoring starts."""
+        self.imp_drag = np.zeros(3)    # from the quadratic + viscous resistive terms
+        self.imp_lift = np.zeros(3)    # from the circulatory lift term
+
+    def _lift(self, R, v_world, f):
+        """Flat-plate circulatory lift, perpendicular to the local relative flow.
+
+        Post-stall flat-plate model: Cl(alpha) = cl * sin(2*alpha), where alpha is the
+        angle between the flow and the plate's plane. At small alpha this grows like
+        alpha while the resistive term grows like alpha^2, which is exactly the regime
+        a foil-like stroke works in and the resistive model alone cannot reward.
+        """
+        speed = np.linalg.norm(v_world, axis=1)
+        live = speed > 1e-9
+        if not np.any(live):
+            return np.zeros_like(v_world)
+        v_hat = np.zeros_like(v_world)
+        v_hat[live] = v_world[live] / speed[live, None]
+        n_world = np.einsum('nij,nj->ni', R, self.NRM)       # plate normal, world frame
+        sin_a = np.sum(n_world * v_hat, axis=1)              # flow angle to the plate
+        cos_a = np.sqrt(np.clip(1.0 - sin_a ** 2, 0.0, 1.0))
+        # Direction: perpendicular to the flow, in the plane spanned by flow and normal.
+        n_perp = n_world - sin_a[:, None] * v_hat
+        n_len = np.linalg.norm(n_perp, axis=1)
+        ok = live & (n_len > 1e-9)
+        l_hat = np.zeros_like(v_world)
+        l_hat[ok] = n_perp[ok] / n_len[ok, None]
+        # The minus sign makes lift oppose the plate's own normal motion.
+        mag = -0.5 * self.rho * (2.0 * self.CL * sin_a * cos_a) * self.A_face \
+            * speed ** 2 * f.ravel()
+        return mag[:, None] * l_hat
 
     # ---------- called every simulation step ----------
     def apply(self, data):
@@ -214,8 +281,19 @@ class HydroModel:
         # anisotropic quadratic drag, evaluated in the geom's local frame
         v_local = np.einsum('nji,nj->ni', R, v_world)        # R^T @ v
         f_local = -0.5 * self.CD * self.rho * self.A * v_local * np.abs(v_local) * f
-        F = np.einsum('nij,nj->ni', R, f_local)
-        F -= self.CV[:, None] * v_world * f                  # linear viscous
+        F_res = np.einsum('nij,nj->ni', R, f_local)
+        F_res -= self.CV[:, None] * v_world * f              # linear viscous
+        F = F_res.copy()
+
+        F_lift = self._lift(R, v_world, f) if self.has_lift else None
+        if F_lift is not None:
+            F += F_lift
+
+        dt = self.m.opt.timestep
+        self.imp_drag += F_res.sum(axis=0) * dt
+        if F_lift is not None:
+            self.imp_lift += F_lift.sum(axis=0) * dt
+
         F[:, 2] += (self.rho * self.g * self.V) * f.ravel()  # buoyancy
         F[:, 2] += self._buoy_ma                             # cancel added-mass weight
         T = np.cross(P - data.xipos[self.bids], F)
@@ -254,7 +332,16 @@ class HydroModel:
         tot_v = sum(i["V"] for i in self.items)
         tot_ma = sum(i["ma"] for i in self.items)
         tot_m = float(np.sum(self.m.body_mass[1:]))
+        if self.has_lift:
+            lifting = [i["name"] for i in self.items if i["cl"] > 0]
+            mode = (f"resistive + lift on {len(lifting)} geoms "
+                    f"(cl up to {self.CL.max():.2f})")
+        elif self.lift_on:
+            mode = "resistive only (lift enabled but every cl is 0)"
+        else:
+            mode = "resistive only (no lift term)"
         return (f"[hydro] geoms={len(self.items)} volume={tot_v*1e6:.1f}cm3 "
                 f"fully-submerged buoyancy={self.rho*tot_v*1000:.1f}g of water | "
                 f"added mass={tot_ma*1000:.1f}g | "
-                f"total mass incl. added={tot_m*1000:.1f}g")
+                f"total mass incl. added={tot_m*1000:.1f}g\n"
+                f"[hydro] propulsion model: {mode}")

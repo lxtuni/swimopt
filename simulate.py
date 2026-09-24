@@ -68,6 +68,7 @@ class Swimmer:
 
         p0 = d.xpos[self.trunk_id].copy()
         yaw0 = self._yaw()
+        self.hydro.reset_impulse()      # only count thrust from the scored window
         energy = 0.0
         blew_up = False
         pitch_max = roll_max = 0.0
@@ -107,10 +108,29 @@ class Swimmer:
         fwd = self._forward_dir(yaw0)
         dist = float(disp[:2] @ fwd)
         n_att = max(n_att, 1)
-        return self.score(dist=dist, yaw_drift=yaw_drift, energy=energy,
-                          roll_rms=np.sqrt(roll_sq / n_att),
-                          pitch_rms=np.sqrt(pitch_sq / n_att),
-                          roll_max=roll_max, pitch_max=pitch_max, traj=traj)
+        res = self.score(dist=dist, yaw_drift=yaw_drift, energy=energy,
+                         roll_rms=np.sqrt(roll_sq / n_att),
+                         pitch_rms=np.sqrt(pitch_sq / n_att),
+                         roll_max=roll_max, pitch_max=pitch_max, traj=traj)
+        res.update(self.thrust_split(fwd))
+        return res
+
+    def thrust_split(self, fwd):
+        """How much of the forward impulse came from lift and how much from drag.
+
+        This is the quantitative test for whether a gait is lift-based or
+        drag-based, rather than judging it by eye from the animation.
+        """
+        drag = float(self.hydro.imp_drag[:2] @ fwd)
+        lift = float(self.hydro.imp_lift[:2] @ fwd)
+        total = abs(drag) + abs(lift)
+        # thrust_* are signed impulses along the heading, in N*s: positive drives the
+        # robot forwards. lift_share is their magnitude ratio only, so read it together
+        # with the signs -- a large share can mean lift is doing the pushing or the
+        # holding back. The decomposition is checked against momentum conservation in
+        # a coast-down, where the two agree to better than 0.01 %.
+        return dict(thrust_drag=drag, thrust_lift=lift,
+                    lift_share=float(abs(lift) / total) if total > 1e-12 else 0.0)
 
     # ---------- scoring ----------
     # One place computes the objective. optimize_view.py runs its own render-aware
@@ -140,6 +160,7 @@ class Swimmer:
                     roll_rms=float(np.degrees(roll_rms)),
                     attitude=attitude,
                     energy=float(energy), power=float(power),
+                    thrust_drag=0.0, thrust_lift=0.0, lift_share=0.0,
                     traj=traj if traj is not None else [])
 
     def diverged(self, traj=None):
@@ -147,6 +168,7 @@ class Swimmer:
         return dict(ok=False, fitness=-1e3, dist=0.0, speed=0.0, bl_s=0.0, yaw=0.0,
                     pitch_amp=0.0, roll_amp=0.0, pitch_rms=0.0, roll_rms=0.0,
                     attitude=0.0, energy=0.0, power=0.0,
+                    thrust_drag=0.0, thrust_lift=0.0, lift_share=0.0,
                     traj=traj if traj is not None else [])
 
     def evaluate(self, x):
