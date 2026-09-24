@@ -28,6 +28,6 @@ echo.
 python -c "import mujoco,cma;print('OK  mujoco',mujoco.__version__,' cma',cma.__version__)"
 echo.
 echo ============================================================
-echo   Done. Now double-click  swimopt\1_看示例步态.bat
+echo   Done. Now double-click  swimopt\1_demo_gait.bat
 echo ============================================================
 pause >nul

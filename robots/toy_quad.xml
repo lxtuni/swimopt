@@ -1,5 +1,6 @@
 <mujoco model="toy_quad_swimmer">
-  <!-- ① 模型层占位: 玩具四足游泳机器人(髋+膝+脚蹼腕 3关节/腿). 换真模型只替换本文件. -->
+  <!-- Layer 1 placeholder: a toy quadruped swimmer, 3 joints per leg
+       (hip, knee, flipper wrist). Swapping in a real robot replaces this file only. -->
   <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast"/>
   <default>
     <joint damping="0.004" armature="0.0002"/>

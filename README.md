@@ -10,7 +10,7 @@ swimming gait.
 Built for the thesis *"Hydrodynamic Modeling and Trajectory Optimization of Paddling
 Propulsion for a Quadruped Robot."*
 
-中文使用说明见 [README.zh-CN.md](README.zh-CN.md)。
+A Chinese translation of the user guide is available in [README.zh-CN.md](README.zh-CN.md).
 
 ---
 
@@ -49,7 +49,7 @@ cd swimopt
 pip install -r requirements.txt
 ```
 
-On Windows you can instead double-click `0_安装环境.bat`, which builds a local
+On Windows you can instead double-click `0_setup_env.bat`, which builds a local
 virtualenv (`mjenv/`) and installs everything.
 
 ## Run
@@ -57,11 +57,11 @@ virtualenv (`mjenv/`) and installs everything.
 ```bash
 python view.py     config.json --demo    # watch a hand-made gait
 python optimize.py config.json 250       # CMA-ES, 250 evaluations (~3 min)
-python view.py     config.json --best    # watch the optimum
+python view.py     config.json           # watch the optimum in results/best.json
 python ui.py                             # graphical control panel
 ```
 
-Windows users: `1_看示例步态.bat` … `8_控制面板.bat` do the same thing, in order.
+Windows users: `1_demo_gait.bat` through `8_control_panel.bat` do the same thing, in order.
 
 Results land in `results/` as `log.csv`, `best.json`, `convergence.json`.
 
