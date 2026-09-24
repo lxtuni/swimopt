@@ -33,6 +33,12 @@ PY = sys.executable
 
 RUN_CFG = "_ui_run.json"          # config written from the panel, fed to the workers
 
+# What the panel reads from the optimizers' output. optimize.py prints lines in
+# exactly these shapes; tests/test_optimize.py checks the two stay in step.
+CANDIDATE_RE = re.compile(r"#\s*(\d+).*?fitness\s*([-+0-9.]+)")
+GENERATION_RE = re.compile(r"evals\s+(\d+).*?best\s*([-+0-9.]+)")
+SIGMA_RE = re.compile(r"sigma\s+([0-9.]+)")
+
 # Playback modes, shown in the dropdown.
 VIEW_EVERY = "every candidate"
 VIEW_FIFTH = "one in five"
@@ -57,7 +63,24 @@ class App:
             e.bind("<FocusOut>", lambda ev: self._update_dim())
             e.bind("<Return>", lambda ev: self._update_dim())
         self._size_to_content()
+        self._stopped = False
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(300, self._pump)
+
+    def _kill_run(self):
+        """End the running job and every worker process it started."""
+        if not (self.proc and self.proc.poll() is None):
+            return
+        if os.name == "nt":
+            # terminate() would only kill the parent; its worker pool would linger.
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.proc.pid)],
+                           capture_output=True)
+        else:
+            self.proc.terminate()
+
+    def _on_close(self):
+        self._kill_run()
+        self.root.destroy()
 
     def _size_to_content(self):
         """Size the window to what the widgets actually need.
@@ -398,6 +421,7 @@ class App:
         if self.proc and self.proc.poll() is None:
             messagebox.showinfo("swimopt", "A run is already in progress. Stop it first.")
             return
+        self._stopped = False
         self.txt.delete("1.0", "end")
         self.hist.clear()
         self._draw_curve()
@@ -441,8 +465,8 @@ class App:
                     "Playing best gait")
 
     def _stop(self):
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
+        self._stopped = True
+        self._kill_run()
         self.lb_stat.config(text="Stopped")
         self.b_run.config(state="normal")
         self.b_stop.config(state="disabled")
@@ -464,20 +488,20 @@ class App:
             while True:
                 line = self.q.get_nowait()
                 if line is None:
-                    self.lb_stat.config(text="Finished")
+                    self.lb_stat.config(text="Stopped" if self._stopped else "Finished")
                     self.b_run.config(state="normal")
                     self.b_stop.config(state="disabled")
                     self._show_best()
                     continue
                 self._log(line)
-                m = re.search(r"#\s*(\d+).*?fitness\s*([-+0-9.]+)", line)
+                m = CANDIDATE_RE.search(line)
                 if m:
                     ev, fit = int(m.group(1)), float(m.group(2))
                     best = max(fit, self.hist[-1][1] if self.hist else -9e9)
                     self.hist.append((ev, best))
                     self._draw_curve()
-                gen_line = re.search(r"evals\s+(\d+).*?best\s*([-+0-9.]+)", line)
-                sigma = re.search(r"sigma\s+([0-9.]+)", line)
+                gen_line = GENERATION_RE.search(line)
+                sigma = SIGMA_RE.search(line)
                 if gen_line or sigma:
                     sig = f"{float(sigma.group(1)):.4f}" if sigma else "--"
                     ev = self.hist[-1][0] if self.hist else 0

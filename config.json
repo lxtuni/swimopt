@@ -18,6 +18,9 @@
   "sim_time":     8.0,     // simulated seconds per evaluation. Shorter is faster,
                            // but too short and steady-state speed is mismeasured
   "settle_time":  1.0,     // seconds of settling before scoring starts, not counted
+  "whole_strokes": true,   // round the scored window up to a whole number of strokes.
+                           // Speed is measured from end-point displacement, so ending
+                           // mid-stroke biases it; this matters most for slow gaits
   "trunk_body":   "trunk",  // trunk body (auto-detected)
   "vmax_guard":   5.0,     // divergence guard: above this speed the run is aborted
                            // and given the worst possible score
@@ -51,7 +54,10 @@
   "sigma0":  0.25,     // initial search radius in the normalized [0,1] space.
                        // 0.2-0.4 is usual: too large wanders, too small gets stuck
   "seed":    1,        // random seed. A different number is an independent search,
-                       // which is how you check that a result is reproducible
+                       // which is how you check that a result is reproducible.
+                       // Must be non-zero: cma treats 0 as "seed from the clock"
+  "workers": "auto",   // parallel worker processes. "auto" = one per candidate, up to
+                       // the CPU count. Results are identical to a serial run
   "outdir":  "results",
 
   // --------------------------------------------------------------------------

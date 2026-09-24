@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<robot name="mini">
+  <link name="base">
+    <inertial><origin xyz="0.01 0 0"/><mass value="0.5"/>
+      <inertia ixx="1e-3" iyy="1e-3" izz="1e-3" ixy="0" ixz="0" iyz="0"/></inertial>
+    <visual><geometry><box size="0.2 0.1 0.05"/></geometry></visual>
+    <collision><geometry><box size="0.2 0.1 0.05"/></geometry></collision>
+  </link>
+  <link name="leg2.1">
+    <inertial><mass value="0.02"/>
+      <inertia ixx="1e-6" iyy="1e-6" izz="1e-6" ixy="0" ixz="0" iyz="0"/></inertial>
+    <visual><geometry><box size="0.01 0.01 0.06"/></geometry></visual>
+    <collision><geometry><box size="0.01 0.01 0.06"/></geometry></collision>
+  </link>
+  <joint name="Joint_FL2.1" type="revolute">
+    <parent link="base"/><child link="leg2.1"/>
+    <origin xyz="0.08 0.05 -0.02"/><axis xyz="0 1 0"/>
+    <limit lower="-1.3" upper="1.3" effort="3" velocity="5"/>
+  </joint>
+</robot>

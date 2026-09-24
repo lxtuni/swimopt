@@ -40,6 +40,9 @@ class SineGait:
         self.ramp_t = cfg.get("ramp_t", 1.5)
         self.groups = cfg.get("groups", [])
         self.H = int(cfg.get("harmonics", 2))
+        if self.H < 1:
+            raise ValueError("gait.harmonics must be at least 1")
+        self._hk = np.arange(1, self.H + 1, dtype=float)[:, None]   # harmonic numbers
         self.amp2_scale = float(cfg.get("amp2_scale", 1.0))
         self._build_index()
         # Parameter freezing: optimize a subset, hold the rest at base_x.
@@ -79,10 +82,10 @@ class SineGait:
         # freq + duty + H * (amp block + phase block) + offset block
         self.dim = 2 + self.H * (self.n_amp + self.n_phase) + self.n_off
         # reverse lookup: actuator i -> its amp slot / offset slot
-        self._amp_slot = [self.amp_idx[self._slot_key(i, nm, "amp")]
-                          for i, nm in enumerate(self.names)]
-        self._off_slot = [self.off_idx[self._slot_key(i, nm, "offset")]
-                          for i, nm in enumerate(self.names)]
+        self._amp_slot = np.array([self.amp_idx[self._slot_key(i, nm, "amp")]
+                                   for i, nm in enumerate(self.names)], dtype=int)
+        self._off_slot = np.array([self.off_idx[self._slot_key(i, nm, "offset")]
+                                   for i, nm in enumerate(self.names)], dtype=int)
 
     # ---- parameter blocks and freezing ----
     def blocks(self):
@@ -193,7 +196,13 @@ class SineGait:
             phases.append(x[k:k + self.n_phase] * 2 * np.pi)
             k += self.n_phase
         offs = self.off_range[0] + x[k:k + self.n_off] * (self.off_range[1] - self.off_range[0])
-        return dict(freq=float(f), duty=float(duty), A=amps, PH=phases, offs=offs)
+        p = dict(freq=float(f), duty=float(duty), A=amps, PH=phases, offs=offs)
+        # Per-actuator arrays for ctrl(), gathered once here instead of every step.
+        # Treat the returned dict as read-only: ctrl() uses these, not A/PH/offs.
+        p["_u_off"] = offs[self._off_slot]
+        p["_u_amp"] = np.array([a[self._amp_slot] for a in amps])     # (H, n)
+        p["_u_ph"] = np.array(phases)                                  # (H, n)
+        return p
 
     def describe(self, x):
         p = self.decode(x)
@@ -217,13 +226,12 @@ class SineGait:
         # the remainder covers pi..2*pi (recovery stroke).
         th = (cycle / duty) * np.pi if cycle < duty \
             else np.pi + ((cycle - duty) / (1.0 - duty)) * np.pi
-        u = np.empty(self.n)
-        for i in range(self.n):
-            val = p["offs"][self._off_slot[i]]
-            for h in range(self.H):
-                val += ramp * p["A"][h][self._amp_slot[i]] * np.sin((h + 1) * th + p["PH"][h][i])
-            u[i] = val
-        return u
+        s = np.sin(self._hk * th + p["_u_ph"])                 # (H, n)
+        return p["_u_off"] + ramp * (p["_u_amp"] * s).sum(0)
+
+    def period(self, x_decoded):
+        """Seconds per stroke. The duty warp reshapes a stroke but not its length."""
+        return 1.0 / x_decoded["freq"]
 
     def info(self):
         return (f"[gait] actuators={self.n}, harmonics H={self.H} -> dimension={self.dim} "

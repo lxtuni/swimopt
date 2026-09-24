@@ -3,10 +3,13 @@
 Rollout and scoring -- wires the model, the hydrodynamics and the gait together and
 turns one parameter vector into one number.
 
-The optimizer touches the simulation only through `evaluate(x)`, so it never needs to
-know anything about the robot.
+The optimizer touches the simulation only through `rollout(x)`, so it never needs to
+know anything about the robot. There is exactly one simulation loop in the project:
+the live viewer renders through its `on_step` callback instead of keeping a copy.
 """
 import json
+import math
+import os
 
 import numpy as np
 import mujoco
@@ -26,6 +29,8 @@ class Swimmer:
         self.data = mujoco.MjData(self.model)
         self.T = float(cfg.get("sim_time", 12.0))
         self.settle = float(cfg.get("settle_time", 1.0))    # let the float settle first
+        # Round the scored window up to whole strokes; see window().
+        self.whole_strokes = bool(cfg.get("whole_strokes", True))
         self.vmax_guard = float(cfg.get("vmax_guard", 5.0))
         self.trunk = cfg.get("trunk_body", None)
         self.trunk_id = (mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, self.trunk)
@@ -38,114 +43,156 @@ class Swimmer:
         self.body_len = float(cfg.get("body_length", 0.0))  # metres, for body-lengths/s
         if self.body_len <= 0:
             self.body_len = self._estimate_body_length()
+        self.free_base = any(self.model.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE
+                             for j in range(self.model.njnt))
+        self._settled = None                                # MjData after settling
 
     def _estimate_body_length(self):
-        """Span along x of every geom's bounding sphere, used to report BL/s."""
+        """Span along world x of every robot geom's bounding sphere, initial pose."""
+        d = mujoco.MjData(self.model)
+        mujoco.mj_forward(self.model, d)
         lo, hi = np.inf, -np.inf
         for g in range(self.model.ngeom):
-            x = float(self.model.geom_pos[g][0])
+            if self.model.geom_bodyid[g] == 0:              # water plane and scenery
+                continue
+            x = float(d.geom_xpos[g][0])
             r = float(self.model.geom_rbound[g])
             lo = min(lo, x - r)
             hi = max(hi, x + r)
-        return max(hi - lo, 1e-3)
+        return max(hi - lo, 1e-3) if hi > lo else 1e-3
+
+    # ---------- settle cache ----------
+    def _restore_settled(self, on_step=None):
+        """Put self.data into the post-settle state, simulating it only once.
+
+        Settling runs with every actuator at zero, so it is identical for every
+        candidate, and re-simulating it cost about a tenth of every rollout. The
+        snapshot is a complete MjData copy, so a restored rollout is bit-identical to
+        a freshly settled one. It assumes the model is not modified after the first
+        rollout; call invalidate_settle() if you do.
+        """
+        m, d = self.model, self.data
+        if self._settled is not None:
+            mujoco.mj_copyData(d, m, self._settled)
+            return True
+        mujoco.mj_resetData(m, d)
+        d.ctrl[:] = 0
+        for k in range(int(self.settle / m.opt.timestep)):
+            self.hydro.apply(d)
+            mujoco.mj_step(m, d)
+            if on_step is not None and on_step(k, "settle") is False:
+                return False                   # aborted: never cache a partial settle
+        self._settled = mujoco.MjData(m)
+        mujoco.mj_copyData(self._settled, m, d)
+        return True
+
+    def invalidate_settle(self):
+        self._settled = None
+
+    def window(self, p):
+        """Scored duration: sim_time, rounded up to a whole number of strokes.
+
+        Speed comes from end-point displacement, so a window that ends mid-stroke is
+        biased by up to half a stroke's travel. At 0.25 Hz an 8 s window holds just two
+        strokes and that bias is large. Rounding up removes it and never measures less
+        than sim_time.
+        """
+        if not self.whole_strokes:
+            return self.T
+        per = self.gait.period(p)
+        return max(math.ceil(self.T / per - 1e-9), 1) * per
 
     # ---------- one rollout ----------
-    def rollout(self, x, record=False):
+    def rollout(self, x, record=False, on_step=None):
+        """Simulate one candidate and score it.
+
+        on_step(k, phase) is called after every simulation step, phase being "settle"
+        or "run". Returning False aborts the rollout, which then returns None.
+        """
         x = self.gait.expand(x)          # accepts a reduced vector when params are frozen
         m, d = self.model, self.data
-        mujoco.mj_resetData(m, d)        # deterministic reset: identical x gives identical run
         p = self.gait.decode(x)
+        if not self._restore_settled(on_step):
+            return None
         dt = m.opt.timestep
-        n_settle = int(self.settle / dt)
-        n_steps = int(self.T / dt)
+        duration = self.window(p)
+        n_steps = int(round(duration / dt))
+        duration = n_steps * dt
         traj = []
 
-        # settling phase: no actuation, wait for the float to stabilize
-        d.ctrl[:] = 0
-        for _ in range(n_settle):
-            self.hydro.apply(d)
-            mujoco.mj_step(m, d)
-
-        p0 = d.xpos[self.trunk_id].copy()
+        tid = self.trunk_id
+        p0 = d.xpos[tid].copy()
         yaw0 = self._yaw()
         self.hydro.reset_impulse()      # only count thrust from the scored window
+        guard_q = self.vmax_guard * 20
+        guard_v2 = self.vmax_guard ** 2
+        # Views into MjData: they track the live values across steps.
+        xmat, cvel = d.xmat[tid], d.cvel[tid]
+        af, av, qvel = d.actuator_force, d.actuator_velocity, d.qvel
         energy = 0.0
-        blew_up = False
-        pitch_max = roll_max = 0.0
-        pitch_sq = roll_sq = 0.0
-        n_att = 0
+        pitch_max = roll_max = pitch_sq = roll_sq = 0.0
         for k in range(n_steps):
-            t = k * dt
-            d.ctrl[:] = self.gait.ctrl(p, t)
+            d.ctrl[:] = self.gait.ctrl(p, k * dt)
             self.hydro.apply(d)
             mujoco.mj_step(m, d)
-            if not np.all(np.isfinite(d.qvel)) or np.max(np.abs(d.qvel)) > self.vmax_guard * 20:
-                blew_up = True
-                break
-            v = np.linalg.norm(d.cvel[self.trunk_id, 3:6])
-            if v > self.vmax_guard:
-                blew_up = True
-                break
-            energy += float(np.sum(np.abs(d.actuator_force * d.actuator_velocity))) * dt
-            R = d.xmat[self.trunk_id].reshape(3, 3)
-            pitch = abs(float(np.arcsin(np.clip(-R[2, 0], -1, 1))))
-            roll = abs(float(np.arctan2(R[2, 1], R[2, 2])))
-            pitch_max = max(pitch_max, pitch)
-            roll_max = max(roll_max, roll)
+            # "not <=" also catches NaN, which compares false against everything
+            if not (np.abs(qvel).max() <= guard_q) or \
+                    cvel[3] * cvel[3] + cvel[4] * cvel[4] + cvel[5] * cvel[5] > guard_v2:
+                return self.diverged(traj)
+            energy += float(np.abs(af * av).sum()) * dt
+            pitch = abs(math.asin(min(1.0, max(-1.0, -xmat[6]))))
+            roll = abs(math.atan2(xmat[7], xmat[8]))
+            if pitch > pitch_max:
+                pitch_max = pitch
+            if roll > roll_max:
+                roll_max = roll
             pitch_sq += pitch * pitch
             roll_sq += roll * roll
-            n_att += 1
             if record and k % 50 == 0:
-                traj.append([t, *d.xpos[self.trunk_id], np.degrees(self._yaw() - yaw0)])
+                traj.append([k * dt, *d.xpos[tid], np.degrees(self._yaw() - yaw0)])
+            if on_step is not None and on_step(k, "run") is False:
+                return None
 
-        if blew_up:
-            return self.diverged(traj)
-
-        p1 = d.xpos[self.trunk_id].copy()
-        disp = p1 - p0
+        disp = d.xpos[tid] - p0
         yaw_drift = abs(np.degrees(self._wrap(self._yaw() - yaw0)))
         # net displacement projected on the initial heading, so circling scores badly
         fwd = self._forward_dir(yaw0)
         dist = float(disp[:2] @ fwd)
-        n_att = max(n_att, 1)
+        n = max(n_steps, 1)
         res = self.score(dist=dist, yaw_drift=yaw_drift, energy=energy,
-                         roll_rms=np.sqrt(roll_sq / n_att),
-                         pitch_rms=np.sqrt(pitch_sq / n_att),
-                         roll_max=roll_max, pitch_max=pitch_max, traj=traj)
+                         roll_rms=math.sqrt(roll_sq / n), pitch_rms=math.sqrt(pitch_sq / n),
+                         roll_max=roll_max, pitch_max=pitch_max, traj=traj,
+                         duration=duration)
         res.update(self.thrust_split(fwd))
         return res
 
     def thrust_split(self, fwd):
-        """How much of the forward impulse came from lift and how much from drag.
+        """Signed forward impulse from the lift and from the resistive terms.
 
-        This is the quantitative test for whether a gait is lift-based or
-        drag-based, rather than judging it by eye from the animation.
+        This is the quantitative test for whether a gait is lift-based or drag-based,
+        rather than judging it by eye. thrust_* are impulses along the heading in
+        N*s, positive driving the robot forwards. lift_share is only their magnitude
+        ratio, so read it together with the signs. The decomposition is checked
+        against momentum conservation by the test suite.
         """
         drag = float(self.hydro.imp_drag[:2] @ fwd)
         lift = float(self.hydro.imp_lift[:2] @ fwd)
         total = abs(drag) + abs(lift)
-        # thrust_* are signed impulses along the heading, in N*s: positive drives the
-        # robot forwards. lift_share is their magnitude ratio only, so read it together
-        # with the signs -- a large share can mean lift is doing the pushing or the
-        # holding back. The decomposition is checked against momentum conservation in
-        # a coast-down, where the two agree to better than 0.01 %.
         return dict(thrust_drag=drag, thrust_lift=lift,
                     lift_share=float(abs(lift) / total) if total > 1e-12 else 0.0)
 
     # ---------- scoring ----------
-    # One place computes the objective. optimize_view.py runs its own render-aware
-    # loop but calls straight into here, so the watched and unwatched searches can
-    # never drift apart on what a gait is worth.
     def score(self, dist, yaw_drift, energy, roll_rms, pitch_rms,
-              roll_max=0.0, pitch_max=0.0, traj=None):
+              roll_max=0.0, pitch_max=0.0, traj=None, duration=None):
         """Turn one rollout's raw measurements into a fitness and a result dict.
 
         `dist` is metres along the initial heading, `yaw_drift` degrees, `energy`
-        joules, and the attitude terms radians.
+        joules, the attitude terms radians, `duration` seconds (default sim_time).
         """
-        speed = dist / self.T
-        power = energy / self.T                  # mean watts, independent of sim length
-        yaw_rate = np.radians(yaw_drift) / self.T
+        T = self.T if duration is None else float(duration)
+        speed = dist / T
+        power = energy / T                       # mean watts, independent of sim length
+        yaw_rate = np.radians(yaw_drift) / T
         attitude = float(roll_rms + pitch_rms)   # radians, RMS over the rollout
         fit = (speed
                - self.w_yaw * yaw_rate
@@ -159,7 +206,7 @@ class Swimmer:
                     pitch_rms=float(np.degrees(pitch_rms)),
                     roll_rms=float(np.degrees(roll_rms)),
                     attitude=attitude,
-                    energy=float(energy), power=float(power),
+                    energy=float(energy), power=float(power), duration=T,
                     thrust_drag=0.0, thrust_lift=0.0, lift_share=0.0,
                     traj=traj if traj is not None else [])
 
@@ -167,7 +214,7 @@ class Swimmer:
         """The result of a rollout that hit the speed guard."""
         return dict(ok=False, fitness=-1e3, dist=0.0, speed=0.0, bl_s=0.0, yaw=0.0,
                     pitch_amp=0.0, roll_amp=0.0, pitch_rms=0.0, roll_rms=0.0,
-                    attitude=0.0, energy=0.0, power=0.0,
+                    attitude=0.0, energy=0.0, power=0.0, duration=0.0,
                     thrust_drag=0.0, thrust_lift=0.0, lift_share=0.0,
                     traj=traj if traj is not None else [])
 
@@ -177,8 +224,8 @@ class Swimmer:
 
     # ---------- helpers ----------
     def _yaw(self):
-        R = self.data.xmat[self.trunk_id].reshape(3, 3)
-        return np.arctan2(R[1, 0], R[0, 0])
+        R = self.data.xmat[self.trunk_id]
+        return math.atan2(R[3], R[0])
 
     @staticmethod
     def _wrap(a):
@@ -189,25 +236,44 @@ class Swimmer:
         return np.array([np.cos(yaw0), np.sin(yaw0)])
 
     def info(self):
-        return "\n".join([
+        lines = [
             self.hydro.summary(),
             self.gait.info(),
             self.gait.opt_summary(),
-            f"[sim] dt={self.model.opt.timestep*1000:.1f}ms duration={self.T}s",
+            f"[sim] dt={self.model.opt.timestep*1000:.1f}ms duration={self.T}s"
+            + (" (rounded up to whole strokes)" if self.whole_strokes else ""),
             f"[objective] fitness = speed - {self.w_yaw} x yaw rate "
             f"- {self.w_energy} x mean power - {self.w_attitude} x attitude",
-        ])
+        ]
+        if not self.free_base:
+            lines.append("[!] this model has NO free joint: the robot is welded to the "
+                         "world and cannot swim. Re-import it with import_model.py.")
+        return "\n".join(lines)
 
 
-def record_best(result, x):
+def record_best(result, x, gait):
     """The part of a rollout result that gets saved to best.json.
 
-    Both optimizers write it, so keeping one definition stops the two files from
-    growing different fields.
+    It stores the FULL parameter vector, frozen entries included, so replaying a
+    result never depends on which parameters the current config happens to freeze.
+    Storing only the optimized subset let a later change of preset silently replay a
+    different gait.
     """
     return dict(fitness=result["fitness"], speed=result["speed"], bl_s=result["bl_s"],
                 yaw=result["yaw"], roll=result["roll_amp"], pitch=result["pitch_amp"],
-                power=result["power"], x=list(map(float, x)))
+                power=result["power"], duration=result["duration"],
+                thrust_lift=result["thrust_lift"], thrust_drag=result["thrust_drag"],
+                x=list(map(float, gait.expand(x))), dim=int(gait.dim),
+                optimized=[k for k, v in gait.opt_flags.items() if v],
+                preset=gait.preset or None)
+
+
+def atomic_json_dump(obj, path, **kw):
+    """Write JSON so a concurrent reader never sees a half-written file."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh, **kw)
+    os.replace(tmp, path)
 
 
 def strip_jsonc(text):

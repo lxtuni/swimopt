@@ -24,6 +24,18 @@ import mujoco
 
 GT = mujoco.mjtGeom
 
+_I1 = np.array([1, 2, 0])
+_I2 = np.array([2, 0, 1])
+
+
+def _cross(a, b):
+    """Row-wise cross product of two (n, 3) arrays.
+
+    np.cross validates and broadcasts on every call, which costs more than the
+    arithmetic for the dozen rows this runs on each step.
+    """
+    return a[:, _I1] * b[:, _I2] - a[:, _I2] * b[:, _I1]
+
 
 def geom_volume_areas(gtype, size):
     """Return (volume, [Ax, Ay, Az]), where A_i is the area facing the local i axis."""
@@ -86,6 +98,7 @@ class HydroModel:
         # Circulatory lift. Off by default: with lift disabled this model is purely
         # resistive, which is what every result before this option was produced with.
         self.lift_on = bool(cfg.get("lift", False))
+        self.skip_visual = bool(cfg.get("skip_visual_duplicates", True))
         self.items = []                            # precomputed data per wetted geom
         self._scan()
         self._apply_added_mass()
@@ -102,13 +115,29 @@ class HydroModel:
                 return r
         return self.default
 
+    def _visual_only(self, gid):
+        return self.m.geom_contype[gid] == 0 and self.m.geom_conaffinity[gid] == 0
+
     def _scan(self):
+        # A URDF import keeps both the visual and the collision shape of every link.
+        # Counting both doubles every fluid force, so a visual-only geom is skipped
+        # whenever its body also has a collision geom. Bodies with nothing but visual
+        # geometry keep it. Models imported by the current import_model.py already
+        # have these marked 'vis_'; this catches models imported before that fix.
+        has_collision = np.zeros(self.m.nbody, dtype=bool)
+        for gid in range(self.m.ngeom):
+            if not self._visual_only(gid):
+                has_collision[self.m.geom_bodyid[gid]] = True
+        self.skipped_visual = []
         for gid in range(self.m.ngeom):
             name = self._gname(gid)
             if any(x.lower() in name.lower() for x in self.exclude):
                 continue
             bid = int(self.m.geom_bodyid[gid])
             if bid == 0:                        # the world body takes no fluid force
+                continue
+            if self.skip_visual and self._visual_only(gid) and has_collision[bid]:
+                self.skipped_visual.append(name)
                 continue
             gtype = self.m.geom_type[gid]
             if gtype in (GT.mjGEOM_PLANE, GT.mjGEOM_HFIELD):
@@ -168,22 +197,13 @@ class HydroModel:
             scale = (m0 + ma) / m0
             self.m.body_mass[bid] = m0 + ma
             self.m.body_inertia[bid] *= scale
-        self._refresh_subtree_mass()
-
-    def _refresh_subtree_mass(self):
-        """Recompute body_subtreemass after body_mass was written.
-
-        MuJoCo derives body_subtreemass when the model is compiled, and writing
-        body_mass afterwards leaves it stale. mj_subtreeVel divides the subtree
-        momentum by it, so anything reading subtree_linvel silently gets a velocity
-        scaled by the ratio of old to new mass.
-        """
-        sub = np.array(self.m.body_mass, dtype=float)
-        # MuJoCo guarantees a parent's index is lower than its children's, so one
-        # reverse pass accumulates every subtree.
-        for bid in range(self.m.nbody - 1, 0, -1):
-            sub[int(self.m.body_parentid[bid])] += sub[bid]
-        self.m.body_subtreemass[:] = sub
+        # Writing body_mass after compilation leaves MuJoCo's derived constants stale:
+        #   body_subtreemass  -> mj_subtreeVel reported velocities scaled by old/new mass
+        #   dof_M0            -> a "simple" body (a lone free body) takes its mass matrix
+        #                        from here, so its added mass was silently ignored
+        #   *_invweight0      -> constraint softness is scaled by the old masses
+        # mj_setConst recomputes all of them from the new masses.
+        mujoco.mj_setConst(self.m, mujoco.MjData(self.m))
 
     def _vectorize(self):
         n = len(self.items)
@@ -192,6 +212,9 @@ class HydroModel:
             # A model with no wetted geom is legal but produces no fluid force.
             self.gids = np.zeros(0, dtype=np.int32)
             self.bids = np.zeros(0, dtype=np.int32)
+            self.CL = np.zeros(0)
+            self.has_lift = False
+            self.reset_impulse()
             return
         self.gids = np.array([i["gid"] for i in self.items], dtype=np.int32)
         self.bids = np.array([i["bid"] for i in self.items], dtype=np.int32)
@@ -214,8 +237,43 @@ class HydroModel:
         self.is_sph = self.TY == int(GT.mjGEOM_SPHERE)
         self.is_cap = (self.TY == int(GT.mjGEOM_CAPSULE)) | (self.TY == int(GT.mjGEOM_CYLINDER))
         self.is_ell = self.TY == int(GT.mjGEOM_ELLIPSOID)
-        self._buoy_ma = self.MA * self.g
+        self._precompute_hot_path(n)
         self.reset_impulse()
+
+    def _precompute_hot_path(self, n):
+        """Everything apply() needs that does not change between steps.
+
+        apply() runs every simulation step on a dozen or so geoms, where numpy's
+        per-call overhead dwarfs the arithmetic. Constants are folded here once, and
+        each geom type is handled through a plain index array instead of a boolean
+        mask evaluated every step.
+        """
+        box = int(GT.mjGEOM_BOX)
+        cap = (int(GT.mjGEOM_CAPSULE), int(GT.mjGEOM_CYLINDER))
+        self.i_box = np.flatnonzero(self.TY == box)
+        self.i_cap = np.flatnonzero(np.isin(self.TY, cap))
+        self.i_ell = np.flatnonzero(self.TY == int(GT.mjGEOM_ELLIPSOID))
+        self.SZ_box = self.SZ[self.i_box]
+        self.SZ_cap = self.SZ[self.i_cap]
+        self.SZ_ell = self.SZ[self.i_ell]
+        # Spheres and anything unrecognized have an orientation-independent extent.
+        self.hz_const = np.where(self.TY == int(GT.mjGEOM_SPHERE), self.SZ[:, 0],
+                                 np.maximum(self.SZ[:, 0], 1e-4)).astype(float)
+        # Folded force coefficients.
+        self.K_drag = 0.5 * self.rho * self.CD * self.A           # (n, 3)
+        self.K_lift = self.rho * self.CL * self.A_face            # 0.5*rho*2*cl*A
+        self.K_buoy = self.rho * self.g * self.V                  # (n,)
+        # Per-body aggregation: xfrc_applied rows for the bodies that own wet geoms.
+        self.bodies = np.unique(self.bids)
+        slot = {b: k for k, b in enumerate(self.bodies)}
+        self.to_body = np.zeros((len(self.bodies), n))
+        for i, b in enumerate(self.bids):
+            self.to_body[slot[b], i] = 1.0
+        # Added-mass weight cancellation, per body. It has to act at the body's centre
+        # of mass, because that is where gravity pulls on the mass it cancels; applied
+        # at a geom centre it would add a spurious torque on any body whose centre of
+        # mass is not at its geom's centre.
+        self.ma_weight = self.ma_body * self.g                    # (nbody,)
 
     # ---------- thrust bookkeeping ----------
     def reset_impulse(self):
@@ -230,80 +288,74 @@ class HydroModel:
         angle between the flow and the plate's plane. At small alpha this grows like
         alpha while the resistive term grows like alpha^2, which is exactly the regime
         a foil-like stroke works in and the resistive model alone cannot reward.
+
+        R is (n,3,3), v_world (n,3), f (n,) immersion fractions.
         """
-        speed = np.linalg.norm(v_world, axis=1)
+        speed2 = (v_world * v_world).sum(1)
+        speed = np.sqrt(speed2)
         live = speed > 1e-9
-        if not np.any(live):
-            return np.zeros_like(v_world)
-        v_hat = np.zeros_like(v_world)
-        v_hat[live] = v_world[live] / speed[live, None]
-        n_world = np.einsum('nij,nj->ni', R, self.NRM)       # plate normal, world frame
-        sin_a = np.sum(n_world * v_hat, axis=1)              # flow angle to the plate
-        cos_a = np.sqrt(np.clip(1.0 - sin_a ** 2, 0.0, 1.0))
+        v_hat = v_world * (live / np.maximum(speed, 1e-12))[:, None]
+        n_world = (R * self.NRM[:, None, :]).sum(2)          # plate normal, world frame
+        sin_a = (n_world * v_hat).sum(1)                     # flow angle to the plate
+        cos_a = np.sqrt(np.clip(1.0 - sin_a * sin_a, 0.0, 1.0))
         # Direction: perpendicular to the flow, in the plane spanned by flow and normal.
         n_perp = n_world - sin_a[:, None] * v_hat
-        n_len = np.linalg.norm(n_perp, axis=1)
-        ok = live & (n_len > 1e-9)
-        l_hat = np.zeros_like(v_world)
-        l_hat[ok] = n_perp[ok] / n_len[ok, None]
+        n_len = np.sqrt((n_perp * n_perp).sum(1))
+        l_hat = n_perp * ((n_len > 1e-9) / np.maximum(n_len, 1e-12))[:, None]
         # The minus sign makes lift oppose the plate's own normal motion.
-        mag = -0.5 * self.rho * (2.0 * self.CL * sin_a * cos_a) * self.A_face \
-            * speed ** 2 * f.ravel()
+        mag = -self.K_lift * sin_a * cos_a * speed2 * f
         return mag[:, None] * l_hat
 
     # ---------- called every simulation step ----------
     def apply(self, data):
-        """Vectorized: all geoms in one pass."""
-        data.xfrc_applied[:] = 0.0
+        """All wet geoms in one pass. Checked against _apply_slow by the test suite."""
+        xfrc = data.xfrc_applied
+        xfrc[:] = 0.0
         if self.empty:
             return
         P = data.geom_xpos[self.gids]                        # (n, 3)
         R = data.geom_xmat[self.gids].reshape(-1, 3, 3)      # (n, 3, 3)
-        # vertical half extent, orientation included
-        hz = np.empty(len(P))
-        a20, a21, a22 = np.abs(R[:, 2, 0]), np.abs(R[:, 2, 1]), np.abs(R[:, 2, 2])
-        hz[self.is_box] = (a20 * self.SZ[:, 0]
-                           + a21 * self.SZ[:, 1]
-                           + a22 * self.SZ[:, 2])[self.is_box]
-        hz[self.is_sph] = self.SZ[self.is_sph, 0]
-        hz[self.is_cap] = (a22 * self.SZ[:, 1] + self.SZ[:, 0])[self.is_cap]
-        hz[self.is_ell] = np.sqrt((R[:, 2, 0] * self.SZ[:, 0]) ** 2
-                                  + (R[:, 2, 1] * self.SZ[:, 1]) ** 2
-                                  + (R[:, 2, 2] * self.SZ[:, 2]) ** 2)[self.is_ell]
-        other = ~(self.is_box | self.is_sph | self.is_cap | self.is_ell)
-        hz[other] = np.maximum(self.SZ[other, 0], 1e-4)
-        hz = np.maximum(np.nan_to_num(hz, nan=1e-6), 1e-6)
-        f = np.clip((self.water_z - (P[:, 2] - hz)) / (2 * hz), 0.0, 1.0)[:, None]   # (n, 1)
-        # velocity of the geom's own point: v = cvel_lin + omega x (p - subtree_com)
-        cv6 = data.cvel[self.bids]
-        off = P - data.subtree_com[self.rootid]
-        v_world = cv6[:, 3:6] + np.cross(cv6[:, 0:3], off)
-        # anisotropic quadratic drag, evaluated in the geom's local frame
-        v_local = np.einsum('nji,nj->ni', R, v_world)        # R^T @ v
-        f_local = -0.5 * self.CD * self.rho * self.A * v_local * np.abs(v_local) * f
-        F_res = np.einsum('nij,nj->ni', R, f_local)
-        F_res -= self.CV[:, None] * v_world * f              # linear viscous
-        F = F_res.copy()
 
-        F_lift = self._lift(R, v_world, f) if self.has_lift else None
-        if F_lift is not None:
-            F += F_lift
+        # vertical half extent in the current orientation, per geom type
+        hz = self.hz_const.copy()
+        if self.i_box.size:
+            hz[self.i_box] = (np.abs(R[self.i_box, 2]) * self.SZ_box).sum(1)
+        if self.i_cap.size:
+            hz[self.i_cap] = (np.abs(R[self.i_cap, 2, 2]) * self.SZ_cap[:, 1]
+                              + self.SZ_cap[:, 0])
+        if self.i_ell.size:
+            hz[self.i_ell] = np.sqrt(((R[self.i_ell, 2] * self.SZ_ell) ** 2).sum(1))
+        np.maximum(hz, 1e-6, out=hz)
+        f = np.clip((self.water_z - P[:, 2] + hz) / (2.0 * hz), 0.0, 1.0)   # (n,)
+
+        # velocity of each geom's own point: v = cvel_lin + omega x (p - subtree_com)
+        cv = data.cvel[self.bids]
+        v = cv[:, 3:6] + _cross(cv[:, 0:3], P - data.subtree_com[self.rootid])
+
+        # anisotropic quadratic drag in the geom's local frame, then back to world
+        vl = (R * v[:, :, None]).sum(1)                      # R^T v
+        fl = -self.K_drag * vl * np.abs(vl) * f[:, None]
+        F = (R * fl[:, None, :]).sum(2)                      # R f_local
+        F -= (self.CV * f)[:, None] * v                      # linear viscous
 
         dt = self.m.opt.timestep
-        self.imp_drag += F_res.sum(axis=0) * dt
-        if F_lift is not None:
-            self.imp_lift += F_lift.sum(axis=0) * dt
+        self.imp_drag += F.sum(0) * dt
+        if self.has_lift:
+            F_lift = self._lift(R, v, f)
+            self.imp_lift += F_lift.sum(0) * dt
+            F = F + F_lift
 
-        F[:, 2] += (self.rho * self.g * self.V) * f.ravel()  # buoyancy
-        F[:, 2] += self._buoy_ma                             # cancel added-mass weight
-        T = np.cross(P - data.xipos[self.bids], F)
-        np.add.at(data.xfrc_applied, self.bids, np.hstack([F, T]))
+        F[:, 2] += self.K_buoy * f                           # buoyancy
+        T = _cross(P - data.xipos[self.bids], F)             # torque about the COM
+        xfrc[self.bodies] = self.to_body @ np.concatenate((F, T), axis=1)
+        xfrc[:, 2] += self.ma_weight                         # at the COM, no torque
 
     def _apply_slow(self, data):
-        """Scalar reference implementation of `apply`, kept for cross-checking.
+        """Scalar reference implementation of `apply`, used by the tests.
 
-        Not used in the hot loop. It is the readable statement of the same physics,
-        and any change to `apply` should keep the two agreeing.
+        Deliberately written differently: one geom at a time, with velocities from
+        mj_objectVelocity rather than from cvel. It is the readable statement of the
+        physics, and the fast path must agree with it.
         """
         data.xfrc_applied[:] = 0.0
         res = np.zeros(6)
@@ -314,8 +366,6 @@ class HydroModel:
             hz = vertical_half_extent(it["gtype"], it["size"], R)
             f = np.clip((self.water_z - (p[2] - hz)) / (2 * hz), 0.0, 1.0) if hz > 1e-9 else 0.0
             F = np.zeros(3)
-            # added-mass weight cancellation, applied whether wetted or not
-            F[2] += it["ma"] * self.g
             if f > 0.0:
                 mujoco.mj_objectVelocity(self.m, data, mujoco.mjtObj.mjOBJ_GEOM, gid, res, 0)
                 v_world = res[3:6]
@@ -324,8 +374,21 @@ class HydroModel:
                 F += R @ f_local
                 F += -it["cv"] * v_world * f
                 F[2] += self.rho * self.g * it["V"] * f
+                if self.lift_on and it["cl"] > 0:
+                    s = float(np.linalg.norm(v_world))
+                    if s > 1e-9:
+                        n = R[:, it["face"]]
+                        sa = float(n @ v_world) / s
+                        ca = np.sqrt(max(0.0, 1.0 - sa * sa))
+                        n_perp = n - sa * v_world / s
+                        nl = float(np.linalg.norm(n_perp))
+                        if nl > 1e-9:
+                            F += (-0.5 * self.rho * 2.0 * it["cl"] * sa * ca
+                                  * it["A"][it["face"]] * s * s * f) * (n_perp / nl)
             data.xfrc_applied[bid, :3] += F
             data.xfrc_applied[bid, 3:] += np.cross(p - data.xipos[bid], F)
+        # added-mass weight cancellation, at each body's centre of mass
+        data.xfrc_applied[:, 2] += self.ma_body * self.g
 
     # ---------- diagnostics ----------
     def summary(self):
@@ -340,8 +403,13 @@ class HydroModel:
             mode = "resistive only (lift enabled but every cl is 0)"
         else:
             mode = "resistive only (no lift term)"
-        return (f"[hydro] geoms={len(self.items)} volume={tot_v*1e6:.1f}cm3 "
-                f"fully-submerged buoyancy={self.rho*tot_v*1000:.1f}g of water | "
-                f"added mass={tot_ma*1000:.1f}g | "
-                f"total mass incl. added={tot_m*1000:.1f}g\n"
-                f"[hydro] propulsion model: {mode}")
+        lines = [f"[hydro] geoms={len(self.items)} volume={tot_v*1e6:.1f}cm3 "
+                 f"fully-submerged buoyancy={self.rho*tot_v*1000:.1f}g of water | "
+                 f"added mass={tot_ma*1000:.1f}g | "
+                 f"total mass incl. added={tot_m*1000:.1f}g",
+                 f"[hydro] propulsion model: {mode}"]
+        if self.skipped_visual:
+            lines.append(f"[hydro] skipped {len(self.skipped_visual)} visual-only geoms "
+                         f"that duplicate a collision geom on the same body "
+                         f"(they would double every fluid force)")
+        return "\n".join(lines)

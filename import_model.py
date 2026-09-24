@@ -2,11 +2,13 @@
 """
 Layer 1, model import -- convert a URDF into an MJCF this pipeline can use.
 
-It does four things automatically:
+It does these things automatically:
   1. rewrite package:// mesh paths, which MuJoCo cannot resolve
   2. inject <mujoco><compiler> settings (mesh directory, inertia fixes)
-  3. add position actuators to the selected joints, since URDF has no actuator concept
-  4. print a report of bodies, joints and geoms, and how hydro coefficients will map
+  3. give the root link a free joint -- URDF bases are welded to the world
+  4. mark visual-only duplicates 'vis_' so fluid forces are not counted twice
+  5. add position actuators to the selected joints, each limited to its joint range
+  6. print a report of bodies, joints and geoms, and how hydro coefficients will map
 
 Usage:
     python import_model.py my_robot.urdf robots/mine.xml --drive "2.1,1.1"
@@ -61,27 +63,96 @@ def fix_urdf(src, meshdir):
     return s
 
 
+def _angle_scale(root):
+    """Factor that turns this file's joint ranges into radians."""
+    comp = root.find("compiler")
+    unit = (comp.get("angle") if comp is not None else None) or "degree"
+    return np.pi / 180.0 if unit == "degree" else 1.0
+
+
 def add_actuators(mjcf_path, drive_keys, kp=60.0, forcerange=12.0, ctrlrange=1.4):
-    """Add a position actuator to every joint matching one of `drive_keys`."""
-    with open(mjcf_path, encoding="utf-8") as fh:
-        s = fh.read()
-    joints = re.findall(r'<joint[^>]*name="([^"]+)"[^>]*>', s)
+    """Add a position actuator to every hinge/slide joint matching `drive_keys`.
+
+    Each actuator's ctrlrange is the joint's own range, so a command can never drive a
+    joint into its limit. Free and ball joints are never actuated: a position actuator
+    on a floating base would fight the very motion the robot is supposed to make.
+    """
+    tree = ET.parse(mjcf_path)
+    root = tree.getroot()
+    scale = _angle_scale(root)
+    joints = [j for j in root.iter("joint")
+              if j.get("name") and j.get("type", "hinge") in ("hinge", "slide")]
     sel = [j for j in joints
-           if not drive_keys or any(k.strip().lower() in j.lower() for k in drive_keys)]
+           if not drive_keys
+           or any(k.strip().lower() in j.get("name").lower() for k in drive_keys)]
     if not sel:
         print("[!] no joint matched, adding no actuators")
-        return s, []
-    acts = "\n".join(
-        f'    <position name="{j}" joint="{j}" kp="{kp}" dampratio="1" '
-        f'ctrlrange="-{ctrlrange} {ctrlrange}" forcerange="-{forcerange} {forcerange}"/>'
-        for j in sel)
-    if "<actuator>" in s:
-        s = re.sub(r'</actuator>', acts + "\n  </actuator>", s, count=1)
-    else:
-        s = s.replace("</mujoco>", f"  <actuator>\n{acts}\n  </actuator>\n</mujoco>")
-    with open(mjcf_path, "w", encoding="utf-8") as fh:
-        fh.write(s)
-    return s, sel
+        return []
+    act = root.find("actuator")
+    if act is None:
+        act = ET.SubElement(root, "actuator")
+    for j in sel:
+        rng = j.get("range")
+        if rng:
+            lo, hi = (float(v) for v in rng.split())
+            if j.get("type", "hinge") == "hinge":
+                lo, hi = lo * scale, hi * scale
+        else:
+            lo, hi = -ctrlrange, ctrlrange
+        ET.SubElement(act, "position", name=j.get("name"), joint=j.get("name"),
+                      kp=f"{kp}", dampratio="1", ctrlrange=f"{lo:.6g} {hi:.6g}",
+                      forcerange=f"-{forcerange} {forcerange}")
+    tree.write(mjcf_path, encoding="utf-8", xml_declaration=True)
+    return [j.get("name") for j in sel]
+
+
+def add_freejoint(mjcf_path):
+    """Give the root body a free joint, so the robot floats instead of being welded.
+
+    URDF has no floating base: MuJoCo imports the root link as a child of the world
+    with no joint at all, and a robot fixed to the world cannot swim.
+    Returns True if a joint was added.
+    """
+    tree = ET.parse(mjcf_path)
+    root = tree.getroot()
+    wb = root.find("worldbody")
+    bodies = wb.findall("body") if wb is not None else []
+    if not bodies:
+        return False
+    base = bodies[0]
+    if base.find("freejoint") is not None or any(
+            j.get("type") == "free" for j in base.findall("joint")):
+        return False
+    base.insert(0, ET.Element("freejoint", name="root"))
+    tree.write(mjcf_path, encoding="utf-8", xml_declaration=True)
+    return True
+
+
+def mark_visual_duplicates(mjcf_path):
+    """Prefix visual-only geoms with 'vis_' when their body also has a collision geom.
+
+    URDF import keeps both the visual and the collision shape of every link, and the
+    hydrodynamic model would otherwise apply buoyancy, drag and added mass to both --
+    doubling every fluid force. 'vis_' is in hydro.exclude by default. A body with
+    only visual geometry keeps it, so it still feels the water.
+    Returns the number of geoms renamed.
+    """
+    tree = ET.parse(mjcf_path)
+    root = tree.getroot()
+    n = 0
+    for body in root.iter("body"):
+        geoms = body.findall("geom")
+        vis = [g for g in geoms
+               if g.get("contype") == "0" and g.get("conaffinity") == "0"]
+        if not vis or len(vis) == len(geoms):
+            continue
+        for g in vis:
+            name = g.get("name") or f"{body.get('name', 'body')}_v{n}"
+            if not name.startswith("vis_"):
+                g.set("name", "vis_" + name)
+                n += 1
+    tree.write(mjcf_path, encoding="utf-8", xml_declaration=True)
+    return n
 
 
 def make_portable(mjcf_path):
@@ -172,8 +243,11 @@ def report(model, rules_hint=("2.4", "2.3", "2.2", "2.1", "1.", "base")):
     print("\n" + "=" * 64)
     print("MODEL REPORT")
     print("=" * 64)
-    print(f"bodies {model.nbody-1} | geoms {model.ngeom} | dofs {model.nq} | "
+    print(f"bodies {model.nbody-1} | geoms {model.ngeom} | dofs {model.nv} | "
           f"actuators {model.nu}")
+    free = any(model.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE for j in range(model.njnt))
+    print("floating base: " + ("yes" if free else
+                               "NO -- the robot is welded to the world and cannot swim"))
 
     print("\n[actuators] (gait parameters are generated from these)")
     for i in range(model.nu):
@@ -257,14 +331,22 @@ def main():
     print(f"      copied {nc} meshes into robots/meshes/ "
           f"(model now uses relative paths and is portable)")
     add_defaults(a.out, a.armature, a.damping)
+    if add_freejoint(a.out):
+        print("      added a free joint to the root body (URDF bases are welded to "
+              "the world, which cannot swim)")
     nn = name_geoms(a.out)
     print(f"      named {nn} geoms after their body (needed for hydro rule matching)")
+    nv = mark_visual_duplicates(a.out)
+    if nv:
+        print(f"      marked {nv} visual-only geoms 'vis_' so fluid forces are not "
+              f"counted twice")
 
     print("[4/4] adding actuators ...")
     keys = [k for k in a.drive.split(",") if k.strip()]
-    _, sel = add_actuators(a.out, keys, kp=a.kp, forcerange=a.force)
+    sel = add_actuators(a.out, keys, kp=a.kp, forcerange=a.force)
     print(f"      added {len(sel)} position actuators"
-          + (f" (matching {keys})" if keys else " (all movable joints)"))
+          + (f" (matching {keys})" if keys else " (all hinge/slide joints)")
+          + ", each limited to its joint's own range")
 
     report(mujoco.MjModel.from_xml_path(a.out))
     print(f'\nNext: set "model" to "{a.out}" in config.json, then run 1_demo_gait.bat.')
