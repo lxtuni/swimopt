@@ -30,8 +30,11 @@ class Swimmer:
         self.trunk = cfg.get("trunk_body", None)
         self.trunk_id = (mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, self.trunk)
                          if self.trunk else 1)
-        self.w_yaw = float(cfg.get("w_yaw", 0.3))           # yaw penalty weight
+        self.w_yaw = float(cfg.get("w_yaw", 0.3))           # heading penalty weight
         self.w_energy = float(cfg.get("w_energy", 0.0))     # 0 means speed only
+        # Attitude penalty. Without it nothing stops the optimizer from rolling the
+        # hull over to get a faster stroke, which it will do given the chance.
+        self.w_attitude = float(cfg.get("w_attitude", 0.05))
         self.body_len = float(cfg.get("body_length", 0.0))  # metres, for body-lengths/s
         if self.body_len <= 0:
             self.body_len = self._estimate_body_length()
@@ -68,6 +71,8 @@ class Swimmer:
         energy = 0.0
         blew_up = False
         pitch_max = roll_max = 0.0
+        pitch_sq = roll_sq = 0.0
+        n_att = 0
         for k in range(n_steps):
             t = k * dt
             d.ctrl[:] = self.gait.ctrl(p, t)
@@ -82,14 +87,18 @@ class Swimmer:
                 break
             energy += float(np.sum(np.abs(d.actuator_force * d.actuator_velocity))) * dt
             R = d.xmat[self.trunk_id].reshape(3, 3)
-            pitch_max = max(pitch_max, abs(float(np.arcsin(np.clip(-R[2, 0], -1, 1)))))
-            roll_max = max(roll_max, abs(float(np.arctan2(R[2, 1], R[2, 2]))))
+            pitch = abs(float(np.arcsin(np.clip(-R[2, 0], -1, 1))))
+            roll = abs(float(np.arctan2(R[2, 1], R[2, 2])))
+            pitch_max = max(pitch_max, pitch)
+            roll_max = max(roll_max, roll)
+            pitch_sq += pitch * pitch
+            roll_sq += roll * roll
+            n_att += 1
             if record and k % 50 == 0:
                 traj.append([t, *d.xpos[self.trunk_id], np.degrees(self._yaw() - yaw0)])
 
         if blew_up:
-            return dict(ok=False, fitness=-1e3, dist=0.0, speed=0.0, bl_s=0.0, yaw=0.0,
-                        pitch_amp=0.0, roll_amp=0.0, energy=0.0, power=0.0, traj=traj)
+            return self.diverged(traj)
 
         p1 = d.xpos[self.trunk_id].copy()
         disp = p1 - p0
@@ -97,14 +106,48 @@ class Swimmer:
         # net displacement projected on the initial heading, so circling scores badly
         fwd = self._forward_dir(yaw0)
         dist = float(disp[:2] @ fwd)
+        n_att = max(n_att, 1)
+        return self.score(dist=dist, yaw_drift=yaw_drift, energy=energy,
+                          roll_rms=np.sqrt(roll_sq / n_att),
+                          pitch_rms=np.sqrt(pitch_sq / n_att),
+                          roll_max=roll_max, pitch_max=pitch_max, traj=traj)
+
+    # ---------- scoring ----------
+    # One place computes the objective. optimize_view.py runs its own render-aware
+    # loop but calls straight into here, so the watched and unwatched searches can
+    # never drift apart on what a gait is worth.
+    def score(self, dist, yaw_drift, energy, roll_rms, pitch_rms,
+              roll_max=0.0, pitch_max=0.0, traj=None):
+        """Turn one rollout's raw measurements into a fitness and a result dict.
+
+        `dist` is metres along the initial heading, `yaw_drift` degrees, `energy`
+        joules, and the attitude terms radians.
+        """
         speed = dist / self.T
-        power = energy / self.T                     # mean watts, independent of sim length
-        fit = speed - self.w_yaw * np.radians(yaw_drift) / self.T - self.w_energy * power
-        return dict(ok=True, fitness=float(fit), dist=dist, speed=speed,
+        power = energy / self.T                  # mean watts, independent of sim length
+        yaw_rate = np.radians(yaw_drift) / self.T
+        attitude = float(roll_rms + pitch_rms)   # radians, RMS over the rollout
+        fit = (speed
+               - self.w_yaw * yaw_rate
+               - self.w_energy * power
+               - self.w_attitude * attitude)
+        return dict(ok=True, fitness=float(fit), dist=float(dist), speed=float(speed),
                     bl_s=float(speed / self.body_len),
-                    yaw=float(yaw_drift), pitch_amp=float(np.degrees(pitch_max)),
+                    yaw=float(yaw_drift),
+                    pitch_amp=float(np.degrees(pitch_max)),
                     roll_amp=float(np.degrees(roll_max)),
-                    energy=float(energy), power=float(power), traj=traj)
+                    pitch_rms=float(np.degrees(pitch_rms)),
+                    roll_rms=float(np.degrees(roll_rms)),
+                    attitude=attitude,
+                    energy=float(energy), power=float(power),
+                    traj=traj if traj is not None else [])
+
+    def diverged(self, traj=None):
+        """The result of a rollout that hit the speed guard."""
+        return dict(ok=False, fitness=-1e3, dist=0.0, speed=0.0, bl_s=0.0, yaw=0.0,
+                    pitch_amp=0.0, roll_amp=0.0, pitch_rms=0.0, roll_rms=0.0,
+                    attitude=0.0, energy=0.0, power=0.0,
+                    traj=traj if traj is not None else [])
 
     def evaluate(self, x):
         """CMA-ES minimizes, so return the negated fitness."""
@@ -128,10 +171,21 @@ class Swimmer:
             self.hydro.summary(),
             self.gait.info(),
             self.gait.opt_summary(),
-            f"[sim] dt={self.model.opt.timestep*1000:.1f}ms duration={self.T}s "
-            f"objective: fitness = speed - {self.w_yaw} x yaw rate "
-            f"- {self.w_energy} x mean power",
+            f"[sim] dt={self.model.opt.timestep*1000:.1f}ms duration={self.T}s",
+            f"[objective] fitness = speed - {self.w_yaw} x yaw rate "
+            f"- {self.w_energy} x mean power - {self.w_attitude} x attitude",
         ])
+
+
+def record_best(result, x):
+    """The part of a rollout result that gets saved to best.json.
+
+    Both optimizers write it, so keeping one definition stops the two files from
+    growing different fields.
+    """
+    return dict(fitness=result["fitness"], speed=result["speed"], bl_s=result["bl_s"],
+                yaw=result["yaw"], roll=result["roll_amp"], pitch=result["pitch_amp"],
+                power=result["power"], x=list(map(float, x)))
 
 
 def strip_jsonc(text):

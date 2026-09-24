@@ -23,7 +23,7 @@ import mujoco
 import mujoco.viewer
 import cma
 
-from simulate import Swimmer, load_cfg
+from simulate import Swimmer, load_cfg, record_best
 
 
 def rollout_view(sw, x, viewer=None, realtime=False, render_every=8):
@@ -50,6 +50,9 @@ def rollout_view(sw, x, viewer=None, realtime=False, render_every=8):
     p0 = d.xpos[sw.trunk_id].copy()
     yaw0 = sw._yaw()
     energy, blew = 0.0, False
+    roll_sq = pitch_sq = 0.0
+    roll_max = pitch_max = 0.0
+    n_att = 0
     for k in range(n_steps):
         t = k * dt
         d.ctrl[:] = sw.gait.ctrl(p, t)
@@ -61,6 +64,14 @@ def rollout_view(sw, x, viewer=None, realtime=False, render_every=8):
             blew = True
             break
         energy += float(np.sum(np.abs(d.actuator_force * d.actuator_velocity))) * dt
+        R = d.xmat[sw.trunk_id].reshape(3, 3)
+        pitch = abs(float(np.arcsin(np.clip(-R[2, 0], -1, 1))))
+        roll = abs(float(np.arctan2(R[2, 1], R[2, 2])))
+        pitch_max = max(pitch_max, pitch)
+        roll_max = max(roll_max, roll)
+        pitch_sq += pitch * pitch
+        roll_sq += roll * roll
+        n_att += 1
         if viewer is not None and k % render_every == 0:
             viewer.sync()
             if not viewer.is_running():
@@ -71,17 +82,17 @@ def rollout_view(sw, x, viewer=None, realtime=False, render_every=8):
                     time.sleep(lag)
 
     if blew:
-        return dict(ok=False, fitness=-1e3, dist=0.0, speed=0.0, yaw=0.0,
-                    energy=0.0, power=0.0)
+        return sw.diverged()
 
     disp = d.xpos[sw.trunk_id].copy() - p0
     yaw_drift = abs(np.degrees(sw._wrap(sw._yaw() - yaw0)))
     dist = float(disp[:2] @ sw._forward_dir(yaw0))
-    speed = dist / sw.T
-    power = energy / sw.T
-    fit = speed - sw.w_yaw * np.radians(yaw_drift) / sw.T - sw.w_energy * power
-    return dict(ok=True, fitness=float(fit), dist=dist, speed=speed,
-                yaw=float(yaw_drift), energy=float(energy), power=float(power))
+    n_att = max(n_att, 1)
+    # Scoring lives in Swimmer.score, so this loop cannot disagree with rollout().
+    return sw.score(dist=dist, yaw_drift=yaw_drift, energy=energy,
+                    roll_rms=np.sqrt(roll_sq / n_att),
+                    pitch_rms=np.sqrt(pitch_sq / n_att),
+                    roll_max=roll_max, pitch_max=pitch_max)
 
 
 def parse_args(argv):
@@ -108,11 +119,12 @@ def main():
 
     log = open(os.path.join(outdir, "log.csv"), "w", newline="", encoding="utf-8")
     wr = csv.writer(log)
-    wr.writerow(["eval", "gen", "fitness", "speed", "yaw", "ok"]
+    wr.writerow(["eval", "gen", "fitness", "speed", "yaw", "roll", "pitch", "power", "ok"]
                 + [f"x{i}" for i in range(sw.gait.dim_opt)])
 
     n_eval, gen, t0 = 0, 0, time.time()
-    best = dict(fitness=-1e9, speed=0.0, yaw=0.0, x=list(map(float, sw.gait.x0_opt())))
+    best = record_best(sw.diverged(), sw.gait.x0_opt())
+    best["fitness"] = -1e9
     mode = ("new records only" if best_only
             else (f"one in {every}" if every > 1 else "every candidate"))
     print(f"\nstarting search (budget {budget}, showing {mode}, "
@@ -133,18 +145,20 @@ def main():
                     break
                 F.append(-r["fitness"])
                 wr.writerow([n_eval, gen, f"{r['fitness']:.5f}", f"{r['speed']:.5f}",
-                             f"{r['yaw']:.2f}", int(r["ok"])] + [f"{q:.4f}" for q in x])
+                             f"{r['yaw']:.2f}", f"{r['roll_amp']:.2f}",
+                             f"{r['pitch_amp']:.2f}", f"{r['power']:.2f}", int(r["ok"])]
+                            + [f"{q:.4f}" for q in x])
                 flag = ""
                 if r["fitness"] > best["fitness"]:
-                    best = dict(fitness=r["fitness"], speed=r["speed"], yaw=r["yaw"],
-                                x=list(map(float, x)))
+                    best = record_best(r, x)
                     with open(os.path.join(outdir, "best.json"), "w", encoding="utf-8") as fh:
                         json.dump(best, fh, indent=1)
                     flag = "  * NEW BEST"
                     if best_only and v.is_running():     # replay it immediately
                         rollout_view(sw, x, v, realtime)
                 print(f"  #{n_eval:4d}  speed {r['speed']:+.4f} m/s  "
-                      f"yaw {r['yaw']:5.1f} deg  fitness {r['fitness']:+.4f}{flag}")
+                      f"yaw {r['yaw']:5.1f} deg  roll {r['roll_amp']:5.1f} deg  "
+                      f"fitness {r['fitness']:+.4f}{flag}")
             if F and not stop:
                 es.tell(X[:len(F)], F)
                 gen += 1
@@ -155,7 +169,9 @@ def main():
 
     print("\n=== best gait ===")
     print(sw.gait.describe(best["x"]))
-    print(f"speed {best['speed']:.4f} m/s | yaw {best['yaw']:.1f} deg | "
+    print(f"speed {best['speed']:.4f} m/s ({best['bl_s']:.2f} BL/s) | "
+          f"yaw {best['yaw']:.1f} deg | roll {best['roll']:.1f} deg | "
+          f"pitch {best['pitch']:.1f} deg | {best['power']:.0f} W | "
           f"{n_eval} rollouts | {time.time()-t0:.0f}s")
     print(f"saved to {outdir}/best.json -- run 3_view_best.bat to replay it")
 

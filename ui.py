@@ -52,7 +52,8 @@ class App:
         self._build()
         self._refresh_models()
         self._load_cfg_into_ui()
-        for e in (self.e_wyaw, self.e_wene, self.e_amax, self.e_f0, self.e_f1, self.e_omax):
+        for e in (self.e_wyaw, self.e_wene, self.e_watt,
+                  self.e_amax, self.e_f0, self.e_f1, self.e_omax):
             e.bind("<FocusOut>", lambda ev: self._update_dim())
             e.bind("<Return>", lambda ev: self._update_dim())
         self._size_to_content()
@@ -166,13 +167,22 @@ class App:
         self.e_wene = ttk.Entry(r1, width=6)
         self.e_wene.insert(0, "0.0")
         self.e_wene.pack(side="left")
-        ttk.Label(r1, text="x mean power (W)").pack(side="left", padx=2)
-        ttk.Label(r1, text="     Presets:").pack(side="left", padx=(16, 4))
-        for txt, wy, we in [("Fastest", "0", "0"), ("Fast + straight", "0.3", "0"),
-                            ("Strictly straight", "1.0", "0"),
-                            ("Power-thrifty", "0.3", "0.0003")]:
-            ttk.Button(r1, text=txt, width=15,
-                       command=lambda a=wy, b=we: self._set_w(a, b)).pack(side="left", padx=2)
+        ttk.Label(r1, text="x mean power (W)  -").pack(side="left", padx=2)
+        self.e_watt = ttk.Entry(r1, width=6)
+        self.e_watt.insert(0, "0.05")
+        self.e_watt.pack(side="left")
+        ttk.Label(r1, text="x attitude (roll+pitch)").pack(side="left", padx=2)
+        r1b = ttk.Frame(f4)
+        r1b.pack(fill="x", pady=2)
+        ttk.Label(r1b, text="Presets:").pack(side="left", padx=(8, 4))
+        for txt, wy, we, wa in [("Fastest", "0", "0", "0"),
+                                ("Fast + level", "0.3", "0", "0.05"),
+                                ("Strictly straight", "1.0", "0", "0.1"),
+                                ("Power-thrifty", "0.3", "0.0003", "0.05"),
+                                ("Speed only (no attitude)", "0.3", "0", "0")]:
+            ttk.Button(r1b, text=txt, width=22,
+                       command=lambda a=wy, b=we, c=wa: self._set_w(a, b, c)).pack(
+                           side="left", padx=2)
         r2 = ttk.Frame(f4)
         r2.pack(fill="x", pady=2)
         ttk.Label(r2, text="Search ranges:   frequency f").pack(side="left", padx=(8, 2))
@@ -249,27 +259,35 @@ class App:
         self.txt = tk.Text(f6, height=9, font=self.font_mono)
         self.txt.pack(fill="both", expand=True, padx=4, pady=4)
 
-    def _set_w(self, wy, we):
-        self.e_wyaw.delete(0, "end")
-        self.e_wyaw.insert(0, wy)
-        self.e_wene.delete(0, "end")
-        self.e_wene.insert(0, we)
+    def _set_w(self, wy, we, wa="0.05"):
+        for entry, value in ((self.e_wyaw, wy), (self.e_wene, we), (self.e_watt, wa)):
+            entry.delete(0, "end")
+            entry.insert(0, value)
         self._update_dim()
 
     def _fit_hint(self):
         try:
-            wy, we = float(self.e_wyaw.get()), float(self.e_wene.get())
+            wy = float(self.e_wyaw.get())
+            we = float(self.e_wene.get())
+            wa = float(self.e_watt.get())
         except ValueError:
             return "(one of the weights is not a number)"
-        if wy == 0 and we == 0:
-            return "Now: pure speed, circling allowed"
+        parts = []
+        if wy == 0:
+            parts.append("heading free (circling allowed)")
+        elif wy >= 1.0:
+            parts.append(f"strictly straight (yaw {wy})")
+        else:
+            parts.append(f"roughly straight (yaw {wy})")
+        if wa == 0:
+            parts.append("ATTITUDE IGNORED -- expect the hull to roll over")
+        elif wa >= 0.15:
+            parts.append(f"very flat (attitude {wa}), noticeably slower")
+        else:
+            parts.append(f"level swimming (attitude {wa})")
         if we > 0:
-            return (f"Now: speed and power traded off -- yaw penalty {wy}, "
-                    f"power penalty {we}/W (at 100-200 W that costs {we*150:.3f}, "
-                    f"which should be comparable to a speed of 0.05-0.1)")
-        if wy >= 1.0:
-            return f"Now: strictly straight (yaw penalty {wy}), which costs some speed"
-        return f"Now: speed and straightness balanced (yaw penalty {wy})"
+            parts.append(f"power {we}/W, costing {we*150:.3f} at 150 W")
+        return "Now: " + "; ".join(parts)
 
     def _entry(self, parent, label, default, width):
         ttk.Label(parent, text=f"  {label}:").pack(side="left")
@@ -289,7 +307,8 @@ class App:
                                  (self.e_pop, c.get("popsize", 10)),
                                  (self.e_seed, c.get("seed", 1)),
                                  (self.e_wyaw, c.get("w_yaw", 0.3)),
-                                 (self.e_wene, c.get("w_energy", 0.0))]:
+                                 (self.e_wene, c.get("w_energy", 0.0)),
+                                 (self.e_watt, c.get("w_attitude", 0.05))]:
                 entry.delete(0, "end")
                 entry.insert(0, str(value))
             g = c.get("gait", {})
@@ -317,6 +336,7 @@ class App:
         c["seed"] = int(self.e_seed.get())
         c["w_yaw"] = float(self.e_wyaw.get())
         c["w_energy"] = float(self.e_wene.get())
+        c["w_attitude"] = float(self.e_watt.get())
         g = c.setdefault("gait", {})
         g["freq_range"] = [float(self.e_f0.get()), float(self.e_f1.get())]
         g["amp_range"] = [0.0, float(self.e_amax.get())]
@@ -541,7 +561,9 @@ class App:
             p = sw.gait.decode(b["x"])
             self.lb_freq.config(text=f"Frequency: {p['freq']:.3f} Hz    "
                                      f"speed: {b.get('speed', 0):+.4f} m/s    "
-                                     f"yaw: {b.get('yaw', 0):.1f} deg")
+                                     f"yaw: {b.get('yaw', 0):.1f} deg    "
+                                     f"roll: {b.get('roll', 0):.1f} deg    "
+                                     f"power: {b.get('power', 0):.0f} W")
             for it in self.tv.get_children():
                 self.tv.delete(it)
             for i, nm in enumerate(sw.gait.names):

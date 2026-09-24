@@ -18,7 +18,7 @@ import csv
 
 import cma
 
-from simulate import Swimmer, load_cfg
+from simulate import Swimmer, load_cfg, record_best
 
 
 def main(cfg_path, budget=None):
@@ -37,10 +37,12 @@ def main(cfg_path, budget=None):
 
     log = open(os.path.join(outdir, "log.csv"), "w", newline="", encoding="utf-8")
     wr = csv.writer(log)
-    wr.writerow(["eval", "gen", "fitness", "speed", "yaw", "ok"] + [f"x{i}" for i in range(dim)])
+    wr.writerow(["eval", "gen", "fitness", "speed", "yaw", "roll", "pitch", "power", "ok"]
+                + [f"x{i}" for i in range(dim)])
 
     n_eval, gen, t0 = 0, 0, time.time()
-    best = dict(fitness=-1e9, speed=0.0, yaw=0.0, x=list(map(float, sw.gait.x0_opt())))
+    best = record_best(sw.diverged(), sw.gait.x0_opt())
+    best["fitness"] = -1e9
     hist = []
     while not es.stop() and n_eval < budget:
         X = es.ask()
@@ -50,18 +52,19 @@ def main(cfg_path, budget=None):
             F.append(-r["fitness"])
             n_eval += 1
             wr.writerow([n_eval, gen, f"{r['fitness']:.5f}", f"{r['speed']:.5f}",
-                         f"{r['yaw']:.2f}", int(r["ok"])] + [f"{v:.4f}" for v in x])
+                         f"{r['yaw']:.2f}", f"{r['roll_amp']:.2f}", f"{r['pitch_amp']:.2f}",
+                         f"{r['power']:.2f}", int(r["ok"])] + [f"{v:.4f}" for v in x])
             flag = ""
             if r["fitness"] > best["fitness"]:
-                best = dict(fitness=r["fitness"], speed=r["speed"], yaw=r["yaw"],
-                            x=list(map(float, x)))
+                best = record_best(r, x)
                 with open(os.path.join(outdir, "best.json"), "w", encoding="utf-8") as fh:
                     json.dump(best, fh, indent=1)
                 flag = "  * NEW BEST"
             # Same per-candidate format as optimize_view.py. The control panel parses
             # these lines to draw its convergence curve, so both must emit them.
             print(f"  #{n_eval:4d}  speed {r['speed']:+.4f} m/s  "
-                  f"yaw {r['yaw']:5.1f} deg  fitness {r['fitness']:+.4f}{flag}")
+                  f"yaw {r['yaw']:5.1f} deg  roll {r['roll_amp']:5.1f} deg  "
+                  f"fitness {r['fitness']:+.4f}{flag}")
         es.tell(X, F)
         gen += 1
         hist.append(best["fitness"])
@@ -74,7 +77,9 @@ def main(cfg_path, budget=None):
 
     print("\n=== best gait ===")
     print(sw.gait.describe(best["x"]))
-    print(f"speed {best['speed']:.4f} m/s | yaw {best['yaw']:.1f} deg | "
+    print(f"speed {best['speed']:.4f} m/s ({best['bl_s']:.2f} BL/s) | "
+          f"yaw {best['yaw']:.1f} deg | roll {best['roll']:.1f} deg | "
+          f"pitch {best['pitch']:.1f} deg | {best['power']:.0f} W | "
           f"{n_eval} rollouts | {time.time()-t0:.0f}s")
     print(f"saved to {outdir}/best.json, log.csv, convergence.json")
 

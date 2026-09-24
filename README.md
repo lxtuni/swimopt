@@ -13,13 +13,13 @@ searching the space of possible strokes.
 </tr>
 <tr>
 <td><b>Hand-built gait</b><br>0.025 m/s &middot; 0.11 body lengths/s</td>
-<td><b>After 250 CMA-ES evaluations</b><br>0.084 m/s &middot; 0.37 body lengths/s</td>
+<td><b>After 250 CMA-ES evaluations</b><br>0.073 m/s &middot; 0.32 body lengths/s</td>
 </tr>
 </table>
 
-Same robot, same water, same three minutes of searching. The right-hand gait is
-3.4 times faster — and it also rolls hard, which is a real finding about the objective
-rather than a rendering artefact. See [Status](#status).
+Same robot, same water, two minutes of searching, 2.9 times faster. What the objective
+does and does not ask for shows up directly in how the robot moves — see
+[Status](#status) for the measured trade-off.
 
 A Chinese translation of the user guide is available in [README.zh-CN.md](README.zh-CN.md).
 
@@ -150,6 +150,19 @@ F = rho*g*V*f            buoyancy
   absorbed into experimentally calibrated coefficients. Same modelling level as the
   beaver-robot literature this builds on.
 
+> **This model is resistive only.** Every force above is anti-parallel to a component
+> of the relative flow. There is no circulatory lift term — no `Cl(alpha)`, no lift
+> slope, no stall. The anisotropic `Cd` does give a flat plate at incidence a force
+> component across the freestream, which is the usual crossflow approximation, but it
+> is not foil lift and it systematically under-rewards it.
+>
+> The consequence matters when interpreting results: **a lift-based, foil-like gait
+> cannot win a search in this simulator, because the mechanism that would make it win
+> is not implemented.** Whatever the optimizer returns here is the best *drag-based*
+> paddling stroke. If you need to compare resistive against lift-based propulsion, a
+> `Cl(alpha)` term has to be added first, and both mechanisms then compete on equal
+> terms.
+
 Links are matched to coefficients by **name pattern** in `config.json`, so a new robot
 needs no code change — just a rule like
 `{ "match": "flip", "cd": [2.2, 0.10, 0.10], "ca": 1.0 }`.
@@ -182,8 +195,15 @@ evolution strategy, not reinforcement learning** — it optimizes the parameters
 fixed-form trajectory, not a state-feedback policy.
 
 ```
-fitness = speed - w_yaw * yaw_rate - w_energy * mean_power
+fitness = speed
+        - w_yaw      * yaw_rate     (rad/s)
+        - w_energy   * mean_power   (W)
+        - w_attitude * attitude     (rad, RMS roll + RMS pitch)
 ```
+
+The attitude term exists because without it the optimizer rolls the hull over to get a
+faster stroke — nothing in the score said it may not, so it did. Setting
+`w_attitude = 0` restores that behaviour if you want to see it.
 
 The weights are a ruler, not a result. Fitness values are not comparable across
 different weight settings, so report the physical quantities — m/s, body lengths/s,
@@ -221,34 +241,39 @@ imports as an open tree and produces no thrust; close it manually with MuJoCo
 
 ## Status
 
-Validated end to end on `toy_quad`. One run of `python optimize.py config.json 250`,
-seed 1, MuJoCo 3.14, 250 rollouts in about three minutes on a laptop CPU:
+Validated end to end on `toy_quad`. Runs of `python optimize.py config.json 250`,
+seed 1, MuJoCo 3.14, 250 rollouts in about two minutes on a laptop CPU. The two
+right-hand columns differ only in `w_attitude`:
 
-| | hand-built gait | optimized gait |
-|---|---|---|
-| forward speed | 0.025 m/s | **0.084 m/s** |
-| body lengths per second | 0.11 | **0.37** |
-| yaw drift over 8 s | 0.2 deg | 4.7 deg |
-| pitch amplitude | 19 deg | 38 deg |
-| roll amplitude | 0.6 deg | **62 deg** |
-| mean mechanical power | 70 W | **426 W** |
+| | hand-built | `w_attitude = 0` | `w_attitude = 0.05` |
+|---|---|---|---|
+| forward speed | 0.025 m/s | 0.084 m/s | 0.073 m/s |
+| body lengths per second | 0.11 | 0.37 | 0.32 |
+| roll amplitude | 0.6 deg | **62 deg** | 22 deg |
+| pitch amplitude | 19 deg | 38 deg | 39 deg |
+| yaw drift over 8 s | 0.2 deg | 4.7 deg | 19 deg |
+| mean mechanical power | 70 W | **426 W** | 146 W |
 
-101 of the 250 rollouts diverged and were rejected by the speed guard, which is normal
-for a first pass over a 35-dimensional space.
+Around a third of the rollouts diverge and are rejected by the speed guard, which is
+normal for a first pass over a 35-dimensional space.
 
-**Read that last column carefully.** The objective is
-`speed - w_yaw*yaw_rate - w_energy*power`, and at the default weights
-(`w_yaw = 0.3`, `w_energy = 0`) nothing penalizes roll, pitch or power. The optimizer
-did exactly what it was asked and found a fast, violently rolling, power-hungry stroke.
-The attitude figures are already computed every rollout but do not enter the score. If
-you want a gait a real robot can hold, raise `w_energy` or add an attitude term — and
-say which you used when you report a number.
+**The middle column is why the attitude term exists.** With `w_attitude = 0` nothing in
+the score forbids rolling the hull, so the optimizer rolled it 62 degrees and spent
+426 W to go 15 % faster. Those attitude figures were already computed every rollout;
+they simply did not enter the objective.
 
-That is the intended use of this tool: it makes the objective's blind spots visible
+**The right-hand column is an improvement, not a fix.** Roll and power drop to about a
+third for a 13 % speed cost, but pitch is unchanged and yaw drift got worse — the
+search moved to a different local optimum. If you need level *and* straight, raise
+`w_attitude` further or penalize pitch separately, and state the weights you used
+whenever you report a number.
+
+That is the intended use of this tool. It makes the objective's blind spots visible
 instead of hiding them behind three hand-picked gaits.
 
 Rollouts are deterministic: identical parameters reproduce a result exactly, which the
-replay path checks.
+replay path checks. The panel and the command line reach identical results from
+identical settings, which is also checked.
 
 Coefficients are currently literature values. Experimental calibration against the
 physical robot — coast-down, static draft, pendulum decay, biped paddling — is the next
