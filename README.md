@@ -1,5 +1,7 @@
 # swimopt
 
+[![tests](https://github.com/lxtuni/swimopt/actions/workflows/tests.yml/badge.svg)](https://github.com/lxtuni/swimopt/actions/workflows/tests.yml)
+
 **Work out how a legged robot should swim — automatically.**
 
 You hand it a robot model. It figures out how the robot should move its legs to swim
