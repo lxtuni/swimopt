@@ -155,6 +155,17 @@ def test_power_goal_minimizes_power_at_the_required_speed(cfg):
     assert "least mean power" in sw.info()
 
 
+def test_surfacing_limit_is_optional_and_enforced_when_set(cfg):
+    free = make_swimmer(cfg)
+    kw = dict(dist=0.8, yaw_drift=0, energy=0, roll_rms=0.01, pitch_rms=0.01,
+              heading_rms=0.01, duration=8.0)
+    assert free.score(surfacing=0.5, **kw)["feasible"]          # reported only
+    held = make_swimmer(cfg, limits={"surfacing": 0.05})
+    assert held.score(surfacing=0.04, **kw)["feasible"]
+    r = held.score(surfacing=0.10, **kw)
+    assert not r["feasible"] and r["penalty"] == pytest.approx(1.0)   # 100 % over
+
+
 def test_old_weight_keys_are_flagged(cfg):
     c = copy.deepcopy(cfg)
     c["w_yaw"] = 0.3

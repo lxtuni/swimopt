@@ -51,8 +51,12 @@
   "limits": {
     "heading_deg": 10,   // RMS heading deviation from the start. Straightness.
     "roll_deg":    10,   // RMS roll. Keeps the hull upright.
-    "pitch_deg":   15    // RMS pitch. Paddling rocks the body, so this is looser.
+    "pitch_deg":   15,   // RMS pitch. Paddling rocks the body, so this is looser.
                          // Set any of these to 180 to switch that limit off.
+    "surfacing":   null  // largest share of the time a limb may break the surface,
+                         // e.g. 0.05. The model has no free-surface physics, so a gait
+                         // that rows across the surface is outside what it predicts.
+                         // null = reported, not enforced
   },
   "w_energy": 0.0,       // power penalty, in body lengths/s per watt. 0 = speed only;
                          // raise it when optimizing cost of transport

@@ -391,9 +391,10 @@ class App:
         c["sim_time"] = float(self.e_time.get())
         c["popsize"] = int(self.e_pop.get())
         c["seed"] = int(self.e_seed.get())
-        c["limits"] = {"heading_deg": float(self.e_lh.get()),
-                       "roll_deg": float(self.e_lr.get()),
-                       "pitch_deg": float(self.e_lp.get())}
+        c["limits"] = dict(c.get("limits") or {},              # keep e.g. "surfacing"
+                           heading_deg=float(self.e_lh.get()),
+                           roll_deg=float(self.e_lr.get()),
+                           pitch_deg=float(self.e_lp.get()))
         c["w_energy"] = float(self.e_wene.get())
         servo = float(self.e_servo.get())
         c["servo"] = {"max_speed_dps": servo if servo > 0 else None}

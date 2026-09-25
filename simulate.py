@@ -50,6 +50,11 @@ class Swimmer:
         # body length per second for every 100 % of excess.
         lim = dict(DEFAULT_LIMITS, **cfg.get("limits", {}))
         self.limits = {k: float(lim[f"{k}_deg"]) for k in ("heading", "roll", "pitch")}
+        # Optional: the largest share of the scored time a limb may spend breaking the
+        # surface. The model has no free-surface physics, so a gait that rows across
+        # the surface is outside what it can predict. None = not enforced.
+        surf = lim.get("surfacing")
+        self.surfacing_limit = None if surf is None else float(surf)
         self.w_energy = float(cfg.get("w_energy", 0.0))     # per watt, in BL/s
         self.legacy_weights = [k for k in ("w_yaw", "w_attitude") if k in cfg]
         # What to optimize. "speed": fastest within the limits. "power": least mean
@@ -288,7 +293,7 @@ class Swimmer:
                          pitch_rms=math.sqrt(pitch_sq / n_steps),
                          heading_rms=math.sqrt(head_sq / n_steps),
                          roll_max=roll_max, pitch_max=pitch_max, traj=traj,
-                         duration=span)
+                         duration=span, surfacing=n_surf / n_steps)
         res.update(self.thrust_split(fwd))
         res.update(peak_joint_speed=math.degrees(peak_w), torque_sat=n_sat / n_steps,
                    surfacing=n_surf / n_steps)
@@ -311,7 +316,7 @@ class Swimmer:
 
     # ---------- scoring ----------
     def score(self, dist, yaw_drift, energy, roll_rms, pitch_rms, heading_rms=0.0,
-              roll_max=0.0, pitch_max=0.0, traj=None, duration=None):
+              roll_max=0.0, pitch_max=0.0, traj=None, duration=None, surfacing=0.0):
         """Turn one rollout's raw measurements into a fitness and a result dict.
 
 Feasibility comes first. A gait is feasible when its RMS heading, roll and pitch
@@ -337,6 +342,9 @@ Feasibility comes first. A gait is feasible when its RMS heading, roll and pitch
                "pitch": math.degrees(pitch_rms)}
         excess = {k: max(0.0, rms[k] - self.limits[k]) / self.limits[k] for k in rms}
         penalty = sum(excess.values())
+        if self.surfacing_limit is not None:
+            penalty += (max(0.0, surfacing - self.surfacing_limit)
+                        / max(self.surfacing_limit, 0.01))
         if self.mode == "power":
             if self.min_speed > 0:
                 penalty += max(0.0, self.min_speed - speed) / self.min_speed

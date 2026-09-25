@@ -120,7 +120,7 @@ def render_sim(use_demo=False, stem=None, best_path=None, lift=False):
     print(f"[sim] wrote {os.path.relpath(gif_path, ROOT)} ({size_mb:.1f} MB)")
 
 
-def render_panel(budget=None, seed=None):
+def render_panel(budget=None, seed=None, family=None):
     """Screenshot the real control panel. Needs an interactive desktop session.
 
     With `budget`, it first drives a real optimization through the panel, so the
@@ -145,6 +145,9 @@ def render_panel(budget=None, seed=None):
         if seed is not None:
             app.e_seed.delete(0, "end")
             app.e_seed.insert(0, str(seed))
+        if family:                       # e.g. "fb": the panel's "fb (bound)" entry
+            app.cb_family.set(next(c for c in ui.FAMILY_CHOICES if c.split()[0] == family))
+            app._update_dim()
         app.cb_view.set(ui.VIEW_NONE)    # no viewer window to overlap the screenshot
         app._start()
         print(f"[panel] running {budget} evaluations through the panel ...")
@@ -192,8 +195,9 @@ if __name__ == "__main__":
     do_panel = "--sim" not in args
     budget = int(_arg(args, "--run")) if "--run" in args else None
     seed = int(_arg(args, "--seed")) if "--seed" in args else None
+    family = _arg(args, "--family")      # fb, diag, lr, wave, inphase; default free
     if do_sim:
         render_sim(use_demo=True)
         render_sim(use_demo=False)
     if do_panel:
-        render_panel(budget, seed)
+        render_panel(budget, seed, family)

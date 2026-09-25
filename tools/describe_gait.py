@@ -171,8 +171,11 @@ def figure(sw, p, r, rec, out, title):
     _style(ax)
     ax.plot(t, rec["speed"], color=INK, linewidth=1.2)
     ax.axhline(r["speed"], color=INK2, linewidth=1.0, linestyle=":")
-    ax.annotate(f"mean {r['speed']:.3f} m/s", (t[-1], r["speed"]), xytext=(-4, 6),
-                textcoords="offset points", ha="right", fontsize=8, color=INK2)
+    # the curve crosses the whole band around the mean, so the label sits in the
+    # empty strip below it rather than on the line
+    ax.set_ylim(min(0.0, rec["speed"].min()) - 0.05 * np.ptp(rec["speed"]), None)
+    ax.annotate(f"dotted: mean {r['speed']:.3f} m/s", (0.995, 0.06),
+                xycoords="axes fraction", ha="right", fontsize=8, color=INK2)
     ax.set_title("Forward speed of the trunk (m/s)", loc="left", fontsize=9.5, color=INK)
     ax.set_xlim(0, t[-1])
     ax.set_xlabel("time after the ramp-in (s)", fontsize=8.5, color=INK2)
