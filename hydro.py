@@ -214,6 +214,8 @@ class HydroModel:
             self.bids = np.zeros(0, dtype=np.int32)
             self.CL = np.zeros(0)
             self.has_lift = False
+            self.is_limb = np.zeros(0, dtype=bool)
+            self.f_last = np.zeros(0)
             self.reset_impulse()
             return
         self.gids = np.array([i["gid"] for i in self.items], dtype=np.int32)
@@ -233,6 +235,10 @@ class HydroModel:
         self.SZ = np.array([i["size"] for i in self.items])
         self.TY = np.array([int(i["gtype"]) for i in self.items])
         self.rootid = self.m.body_rootid[self.bids]
+        # Limbs are everything below the floating root body. Used to measure how often
+        # a limb breaks the surface, which this model has no physics for.
+        self.is_limb = self.bids != self.rootid
+        self.f_last = np.ones(n)
         self.is_box = self.TY == int(GT.mjGEOM_BOX)
         self.is_sph = self.TY == int(GT.mjGEOM_SPHERE)
         self.is_cap = (self.TY == int(GT.mjGEOM_CAPSULE)) | (self.TY == int(GT.mjGEOM_CYLINDER))
@@ -327,6 +333,7 @@ class HydroModel:
             hz[self.i_ell] = np.sqrt(((R[self.i_ell, 2] * self.SZ_ell) ** 2).sum(1))
         np.maximum(hz, 1e-6, out=hz)
         f = np.clip((self.water_z - P[:, 2] + hz) / (2.0 * hz), 0.0, 1.0)   # (n,)
+        self.f_last = f
 
         # velocity of each geom's own point: v = cvel_lin + omega x (p - subtree_com)
         cv = data.cvel[self.bids]

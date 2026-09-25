@@ -4,7 +4,10 @@ Layer 3, control -- robot-agnostic gait parameterization.
 
 Scans every actuator in the model and drives it with a truncated Fourier series:
 
-    q_i(t) = offset_i + sum_{h=1..H} amp_i^h * sin(2*pi*h*f*t + phase_i^h)
+    q_i(t) = offset_i + sum_{h=1..H} amp_i^h * sin(h * theta_i(t) + phase_i^h)
+
+where theta_i is the stroke angle: 0..pi over the power stroke, pi..2pi over the
+recovery, with the power stroke taking a fraction `duty` of the period.
 
 The second harmonic is invariant under a phase shift of pi, which makes it the natural
 way to express flipper feathering: spread on the power stroke, furl on recovery. It is
@@ -13,17 +16,91 @@ single harmonic already sweeps the leg non-reciprocally (0.16 m/s on toy_quad wi
 pure sinusoid, 0.30 m/s with the duty warp); an earlier comment claiming otherwise was
 wrong and had never been tested.
 
-Parameter vector = [freq, duty] + per-actuator (amp^h, phase^h) + offsets.
+Two ways to parameterize phase:
+
+  free    every actuator has its own phase per harmonic. The search can find any
+          coordination, including ones no textbook names. 35 dims on toy_quad.
+  family  the legs keep a textbook timing -- trot, pace, bound, walk, pronk -- as a
+          time delay of each whole leg, and only the phase of each joint *type* (hip,
+          knee, flipper) is searched, shared by all legs. 17 dims on toy_quad. This is
+          how gait families are compared fairly: each at its own best stroke.
+
+Legs and joint types come from the model's geometry, not from actuator names: a leg is
+the chain of bodies hanging off the floating trunk, front/back and left/right from
+where it attaches, and a joint's type is its depth down that chain.
+
 Actuators can share amp/offset through `groups`, which lowers the search dimension:
 
     groups = [{"match": "1.1", "share": ["amp", "offset"]},
               {"match": "2.1", "share": ["amp", "offset"]}]
-
-Swapping robots changes the actuator count, the parameter vector resizes itself, and
-no other module needs to change.
 """
 import numpy as np
 import mujoco
+
+LEGS = ("FL", "FR", "BL", "BR")
+
+# Each leg's delay, as a fraction of the stroke period, behind the front-left leg.
+FAMILIES = {
+    "diag":    {"FL": 0.0, "FR": 0.5, "BL": 0.5, "BR": 0.0},    # trot
+    "lr":      {"FL": 0.0, "FR": 0.5, "BL": 0.0, "BR": 0.5},    # pace
+    "fb":      {"FL": 0.0, "FR": 0.0, "BL": 0.5, "BR": 0.5},    # bound
+    "wave":    {"FL": 0.0, "FR": 0.5, "BL": 0.75, "BR": 0.25},  # lateral-sequence walk
+    "inphase": {"FL": 0.0, "FR": 0.0, "BL": 0.0, "BR": 0.0},    # pronk
+}
+ALIASES = {"trot": "diag", "pace": "lr", "bound": "fb", "walk": "wave", "pronk": "inphase"}
+COMMON_NAMES = {"diag": "trot", "lr": "pace", "fb": "bound", "wave": "walk",
+                "inphase": "pronk"}
+
+
+def family_key(name):
+    """Canonical family key for a name or alias, or None for free phases."""
+    if name in (None, "", "free"):
+        return None
+    k = ALIASES.get(name, name)
+    if k not in FAMILIES:
+        raise ValueError(f"unknown gait family {name!r}; choose from "
+                         f"{sorted(FAMILIES) + sorted(ALIASES)}")
+    return k
+
+
+def limb_layout(model):
+    """Which leg each actuator belongs to, and how deep down that leg its joint is.
+
+    A leg is the chain of bodies below one child of the floating trunk. Front/back and
+    left/right come from where that child attaches to the trunk (MuJoCo: x forward,
+    y left). Depth 0 is the joint nearest the trunk. Returns (legs, depth), with None
+    for an actuator that cannot be placed; names containing FL/FR/BL/BR are used as a
+    fallback when the geometry is ambiguous.
+    """
+    parent = model.body_parentid
+    free = [model.jnt_bodyid[j] for j in range(model.njnt)
+            if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE]
+    root = int(free[0]) if free else 1
+    legs, depth = [], []
+    for a in range(model.nu):
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, a) or ""
+        leg, dpt = None, None
+        if model.actuator_trntype[a] == mujoco.mjtTrn.mjTRN_JOINT:
+            b = int(model.jnt_bodyid[model.actuator_trnid[a, 0]])
+            dpt = 0
+            while b not in (0, root) and parent[b] != root:
+                b = int(parent[b])
+                dpt += 1
+            if b not in (0, root):
+                x, y = model.body_pos[b][:2]
+                tol = 1e-6
+                if abs(x) > tol and abs(y) > tol:
+                    leg = ("F" if x > 0 else "B") + ("L" if y > 0 else "R")
+        if leg is None:
+            leg = next((L for L in LEGS if L in name), None)
+        legs.append(leg)
+        depth.append(dpt if dpt is not None else 0)
+    return legs, np.array(depth, dtype=int)
+
+
+def _circ(a):
+    """Signed circular difference of cycle fractions, in [-0.5, 0.5)."""
+    return (np.asarray(a) + 0.5) % 1.0 - 0.5
 
 
 class SineGait:
@@ -46,12 +123,29 @@ class SineGait:
             raise ValueError("gait.harmonics must be at least 1")
         self._hk = np.arange(1, self.H + 1, dtype=float)[:, None]   # harmonic numbers
         self.amp2_scale = float(cfg.get("amp2_scale", 1.0))
-        self._build_index()
-        # Parameter freezing: optimize a subset, hold the rest at base_x.
-        self.base_x = np.full(self.dim, 0.5)
         self.opt_flags = dict(freq=True, duty=True, amp=True, phase=True, offset=True)
         self.opt_flags.update({k: bool(v) for k, v in cfg.get("optimize", {}).items()})
-        self.preset = cfg.get("preset_phase", "")   # gait used when phase is frozen
+
+        self.legs, self.depth = limb_layout(model)
+        self.n_types = int(self.depth.max()) + 1 if self.n else 0
+        # "family" picks the leg timing. The older "preset_phase" still works the way
+        # it always did: only when phase is frozen.
+        fam = cfg.get("family")
+        if fam is None and not self.opt_flags["phase"]:
+            fam = cfg.get("preset_phase")
+        self.family = family_key(fam)
+        if self.family is not None:
+            missing = [self.names[i] for i, L in enumerate(self.legs) if L is None]
+            if missing:
+                raise ValueError(f"gait family {self.family!r} needs every actuator on a "
+                                 f"front/back, left/right leg; cannot place {missing}")
+            self._shift = np.array([FAMILIES[self.family][L] for L in self.legs])
+        else:
+            self._shift = None
+        self.preset = self.family or ""          # kept for older callers and the panel
+
+        self._build_index()
+        self.base_x = np.full(self.dim, 0.5)
         self._build_mask()
 
     # ---- parameter indexing: decides which actuators share amp/offset ----
@@ -80,7 +174,8 @@ class SineGait:
                     table[key] = len(table)
         self.n_amp = len(self.amp_idx)
         self.n_off = len(self.off_idx)
-        self.n_phase = self.n                # phase is always per-actuator
+        # free: a phase per actuator; family: a phase per joint type, shared by legs
+        self.n_phase = self.n if self.family is None else self.n_types
         # freq + duty + H * (amp block + phase block) + offset block
         self.dim = 2 + self.H * (self.n_amp + self.n_phase) + self.n_off
         # reverse lookup: actuator i -> its amp slot / offset slot
@@ -101,26 +196,6 @@ class SineGait:
         b["offset"] = (k, k + self.n_off)
         return b
 
-    def preset_phases(self, name):
-        """Phases of a textbook gait, normalized to [0, 1]. name: diag/fb/lr/wave/inphase."""
-        two_pi = 2 * np.pi
-        table = {
-            "diag":    {"FL": 0, "BR": 0, "FR": np.pi, "BL": np.pi},
-            "fb":      {"FL": 0, "FR": 0, "BL": np.pi, "BR": np.pi},
-            "lr":      {"FL": 0, "BL": 0, "FR": np.pi, "BR": np.pi},
-            "wave":    {"FL": 0, "FR": np.pi / 2, "BR": np.pi, "BL": 3 * np.pi / 2},
-            "inphase": {"FL": 0, "FR": 0, "BL": 0, "BR": 0},
-        }
-        t = table.get(name, table["diag"])
-        out = np.zeros(self.n_phase)
-        for i, nm in enumerate(self.names):
-            leg = next((L for L in ("FL", "FR", "BL", "BR") if L in nm), "FL")
-            # keep a default intra-leg offset: hip 0 deg, knee 60 deg, wrist 0 deg
-            is_knee = (".2" in nm or "2." in nm)
-            ph = t[leg] + (np.radians(60) if is_knee else 0.0)
-            out[i] = (ph % two_pi) / two_pi
-        return out
-
     def _build_mask(self):
         b = self.blocks()
         mask = np.zeros(self.dim, dtype=bool)
@@ -136,14 +211,15 @@ class SineGait:
             mask[i0:i1] = self.opt_flags.get(key, True)
         self.mask = mask
         self.dim_opt = int(mask.sum())
-        # Fill base_x with the preset gait, but only when phase is actually frozen.
-        # The control panel always writes a preset_phase into its run config; applying
-        # it while phase is being optimized would silently move the CMA-ES start point,
-        # so the panel and the command line would disagree on identical settings.
-        if self.preset and not self.opt_flags.get("phase", True):
+        # With phase frozen in a family, each joint type keeps a textbook stroke: hip
+        # and flipper in phase, knee 60 degrees ahead, no second-harmonic offset.
+        if self.family is not None and not self.opt_flags.get("phase", True):
             for name, (i0, i1) in b.items():
                 if name == "phase1":
-                    self.base_x[i0:i1] = self.preset_phases(self.preset)
+                    frozen = np.zeros(self.n_types)
+                    if self.n_types > 1:
+                        frozen[1] = 60.0 / 360.0
+                    self.base_x[i0:i1] = frozen
                 elif name.startswith("phase"):
                     self.base_x[i0:i1] = 0.0
 
@@ -168,8 +244,9 @@ class SineGait:
         s = f"[search space] optimizing {self.dim_opt}/{self.dim} dims: {'+'.join(on)}"
         if off:
             s += f" | frozen: {'+'.join(off)}"
-            if self.preset and not self.opt_flags.get("phase", True):
-                s += f" (phase pinned to the '{self.preset}' gait)"
+        if self.family is not None:
+            s += (f" | family '{self.family}' ({COMMON_NAMES[self.family]}): leg timing "
+                  f"fixed, joint-type phases {'searched' if self.opt_flags['phase'] else 'fixed'}")
         return s
 
     # ---- optimizer interface: normalized [0,1]^dim <-> physical parameters ----
@@ -184,50 +261,58 @@ class SineGait:
 
         Accepts either a full vector or a reduced one; reduced vectors are expanded
         first, so callers never have to track which of the two they are holding.
+        PH is each actuator's phase as seen at a common clock, so tables and plots
+        read the same in both modes.
         """
         x = self.expand(x)
         k = 0
         f = self.freq_range[0] + x[k] * (self.freq_range[1] - self.freq_range[0]); k += 1
         duty = self.duty_range[0] + x[k] * (self.duty_range[1] - self.duty_range[0]); k += 1
-        amps, phases = [], []
+        amps, blocks = [], []
         for h in range(self.H):
             scale = 1.0 if h == 0 else self.amp2_scale
             amps.append(self.amp_range[0]
                         + x[k:k + self.n_amp] * (self.amp_range[1] - self.amp_range[0]) * scale)
             k += self.n_amp
-            phases.append(x[k:k + self.n_phase] * 2 * np.pi)
+            blocks.append(x[k:k + self.n_phase] * 2 * np.pi)
             k += self.n_phase
         offs = self.off_range[0] + x[k:k + self.n_off] * (self.off_range[1] - self.off_range[0])
-        p = dict(freq=float(f), duty=float(duty), A=amps, PH=phases, offs=offs)
+        if self._shift is None:
+            u_ph = np.array(blocks)                                   # (H, n)
+            phases = list(u_ph)
+        else:
+            u_ph = np.array([blk[self.depth] for blk in blocks])     # (H, n)
+            # the same leg delayed by `shift` looks, at a common clock, like a phase
+            # of -h * 2pi * shift on harmonic h
+            phases = [(u_ph[h] - (h + 1) * 2 * np.pi * self._shift) % (2 * np.pi)
+                      for h in range(self.H)]
+        p = dict(freq=float(f), duty=float(duty), A=amps, PH=phases, offs=offs,
+                 family=self.family)
         # Per-actuator arrays for ctrl(), gathered once here instead of every step.
         # Treat the returned dict as read-only: ctrl() uses these, not A/PH/offs.
         p["_u_off"] = offs[self._off_slot]
         p["_u_amp"] = np.array([a[self._amp_slot] for a in amps])     # (H, n)
-        p["_u_ph"] = np.array(phases)                                  # (H, n)
+        p["_u_ph"] = u_ph
+        p["_u_shift"] = self._shift
         return p
-
-    def describe(self, x):
-        p = self.decode(x)
-        lines = [f"freq={p['freq']:.3f} Hz  power-stroke duty={p['duty']*100:.0f}%  "
-                 f"(harmonics H={self.H})"]
-        for i, nm in enumerate(self.names):
-            harm = "  ".join(
-                f"h{h+1}: amp={p['A'][h][self._amp_slot[i]]:+.3f} "
-                f"ph={np.degrees(p['PH'][h][i]):6.1f}deg"
-                for h in range(self.H))
-            lines.append(f"  {nm:<16} off={p['offs'][self._off_slot[i]]:+.3f}  {harm}")
-        return "\n".join(lines)
 
     # ---- called every simulation step ----
     def ctrl(self, x_decoded, t):
         p = x_decoded
         ramp = min(1.0, t / self.ramp_t) if self.ramp_t > 0 else 1.0
         duty = p.get("duty", 0.5)
-        cycle = (p["freq"] * t) % 1.0                  # progress through one period
-        # Phase warp: the first `duty` of the period covers 0..pi (power stroke),
-        # the remainder covers pi..2*pi (recovery stroke).
-        th = (cycle / duty) * np.pi if cycle < duty \
-            else np.pi + ((cycle - duty) / (1.0 - duty)) * np.pi
+        shift = p.get("_u_shift")
+        if shift is None:
+            cycle = (p["freq"] * t) % 1.0                  # progress through one period
+            # Phase warp: the first `duty` of the period covers 0..pi (power stroke),
+            # the remainder covers pi..2*pi (recovery stroke).
+            th = (cycle / duty) * np.pi if cycle < duty \
+                else np.pi + ((cycle - duty) / (1.0 - duty)) * np.pi
+        else:
+            # Each leg runs the same warped stroke, delayed by its family shift.
+            cycle = (p["freq"] * t - shift) % 1.0
+            th = np.where(cycle < duty, cycle / duty * np.pi,
+                          np.pi + (cycle - duty) / (1.0 - duty) * np.pi)
         s = np.sin(self._hk * th + p["_u_ph"])                 # (H, n)
         return p["_u_off"] + ramp * (p["_u_amp"] * s).sum(0)
 
@@ -235,7 +320,61 @@ class SineGait:
         """Seconds per stroke. The duty warp reshapes a stroke but not its length."""
         return 1.0 / x_decoded["freq"]
 
+    # ---- describing a gait ----
+    def structure(self, x):
+        """What kind of gait is this? Leg timing, and the nearest textbook family.
+
+        Leg timing is read from the joint type that moves most (largest first-harmonic
+        amplitude): each leg's delay behind the front-left leg, as a fraction of the
+        stroke. The nearest family is the one with the smallest mean circular distance
+        from those delays. Returns None if the legs cannot be identified.
+        """
+        if any(L is None for L in self.legs) or set(self.legs) < set(LEGS):
+            return None
+        p = self.decode(x)
+        amp1 = p["_u_amp"][0]
+        types = range(self.n_types)
+        type_amp = [float(amp1[self.depth == t].mean()) if np.any(self.depth == t) else 0.0
+                    for t in types]
+        dom = int(np.argmax(type_amp))
+        phase = {}
+        for L in LEGS:
+            i = next(i for i in range(self.n) if self.legs[i] == L and self.depth[i] == dom)
+            phase[L] = p["PH"][0][i]
+        delay = {L: float((phase["FL"] - phase[L]) / (2 * np.pi) % 1.0) for L in LEGS}
+        dist = {}
+        for fam, ref in FAMILIES.items():
+            dist[fam] = float(np.mean([abs(_circ(delay[L] - ref[L])) for L in LEGS[1:]]))
+        near = min(dist, key=dist.get)
+        return dict(delay=delay, dominant_joint=dom, type_amp_deg=np.degrees(type_amp),
+                    nearest=near, nearest_common=COMMON_NAMES[near],
+                    deviation=dist[near], distances=dist)
+
+    def describe(self, x):
+        p = self.decode(x)
+        mode = (f"family {self.family} ({COMMON_NAMES[self.family]})"
+                if self.family else "free phases")
+        lines = [f"freq={p['freq']:.3f} Hz  power-stroke duty={p['duty']*100:.0f}%  "
+                 f"(harmonics H={self.H}, {mode})"]
+        for i, nm in enumerate(self.names):
+            harm = "  ".join(
+                f"h{h+1}: amp={p['A'][h][self._amp_slot[i]]:+.3f} "
+                f"ph={np.degrees(p['PH'][h][i]):6.1f}deg"
+                for h in range(self.H))
+            lines.append(f"  {nm:<16} off={p['offs'][self._off_slot[i]]:+.3f}  {harm}")
+        st = self.structure(x)
+        if st is not None:
+            d = st["delay"]
+            lines.append("  leg delay behind FL (fraction of a stroke): "
+                         + "  ".join(f"{L} {d[L]:.2f}" for L in LEGS))
+            lines.append(f"  closest textbook gait: {st['nearest']} "
+                         f"({st['nearest_common']}), off by {st['deviation']*100:.0f}% "
+                         f"of a stroke on average")
+        return "\n".join(lines)
+
     def info(self):
-        return (f"[gait] actuators={self.n}, harmonics H={self.H} -> dimension={self.dim} "
-                f"(freq 1 + duty 1 + H x (amp {self.n_amp} + phase {self.n_phase}) "
-                f"+ offset {self.n_off})")
+        placed = sum(L is not None for L in self.legs)
+        return (f"[gait] actuators={self.n} on {len(set(L for L in self.legs if L))} legs "
+                f"({placed} placed), joint types {self.n_types}, harmonics H={self.H} -> "
+                f"dimension={self.dim} (freq 1 + duty 1 + H x (amp {self.n_amp} + phase "
+                f"{self.n_phase}) + offset {self.n_off})")

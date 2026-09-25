@@ -39,6 +39,12 @@ CANDIDATE_RE = re.compile(r"#\s*(\d+).*?fitness\s*([-+0-9.]+)")
 GENERATION_RE = re.compile(r"evals\s+(\d+).*?best\s*([-+0-9.]+)")
 SIGMA_RE = re.compile(r"sigma\s+([0-9.]+)")
 
+# Gait families and goals, as shown in their dropdowns; the first word is the key.
+FAMILY_CHOICES = ["free (every joint its own phase)", "diag (trot)", "lr (pace)",
+                  "fb (bound)", "wave (walk)", "inphase (pronk)"]
+GOAL_CHOICES = ["speed (fastest within the limits)",
+                "power (least power at the required speed)"]
+
 # Playback modes, shown in the dropdown.
 VIEW_EVERY = "every candidate"
 VIEW_FIFTH = "one in five"
@@ -58,7 +64,7 @@ class App:
         self._build()
         self._refresh_models()
         self._load_cfg_into_ui()
-        for e in (self.e_lh, self.e_lr, self.e_lp, self.e_wene,
+        for e in (self.e_lh, self.e_lr, self.e_lp, self.e_wene, self.e_servo, self.e_vmin,
                   self.e_amax, self.e_f0, self.e_f1, self.e_omax):
             e.bind("<FocusOut>", lambda ev: self._update_dim())
             e.bind("<Return>", lambda ev: self._update_dim())
@@ -147,18 +153,15 @@ class App:
         for txt, var in [("Frequency f", self.v_freq),
                          ("Duty cycle (power stroke %)", self.v_duty),
                          ("Amplitude A", self.v_amp),
-                         ("Phase phi (= the gait)", self.v_phase),
+                         ("Phase phi", self.v_phase),
                          ("Offset", self.v_off)]:
             ttk.Checkbutton(f2, text=txt, variable=var,
                             command=self._update_dim).pack(side="left", padx=8)
-        ttk.Label(f2, text="   When phase is frozen, pin it to:").pack(side="left")
-        self.cb_preset = ttk.Combobox(f2, width=16, state="readonly",
-                                      values=["diag (diagonal)", "fb (front-back)",
-                                              "lr (left-right)", "wave (travelling)",
-                                              "inphase (all together)"])
-        self.cb_preset.current(0)
-        self.cb_preset.pack(side="left", padx=4)
-        self.cb_preset.bind("<<ComboboxSelected>>", lambda e: self._update_dim())
+        ttk.Label(f2, text="   Gait family:").pack(side="left")
+        self.cb_family = ttk.Combobox(f2, width=24, state="readonly", values=FAMILY_CHOICES)
+        self.cb_family.current(0)
+        self.cb_family.pack(side="left", padx=4)
+        self.cb_family.bind("<<ComboboxSelected>>", lambda e: self._update_dim())
         self.lb_dim = ttk.Label(f2, text="", foreground="#a0410d", font=self.font_big)
         self.lb_dim.pack(side="left", padx=14)
 
@@ -169,6 +172,7 @@ class App:
         self.e_time = self._entry(f3, "Seconds per rollout", "8.0", 6)
         self.e_pop = self._entry(f3, "Population size", "10", 5)
         self.e_seed = self._entry(f3, "Random seed", "1", 5)
+        self.e_servo = self._entry(f3, "Servo max deg/s", "400", 5)
         ttk.Label(f3, text="  Playback:").pack(side="left")
         self.cb_view = ttk.Combobox(f3, width=18, state="readonly",
                                     values=[VIEW_EVERY, VIEW_FIFTH, VIEW_BEST, VIEW_NONE])
@@ -180,10 +184,21 @@ class App:
         # === 4. objective and search ranges ===
         f4 = ttk.LabelFrame(self.root, text=" 4. Objective -- what counts as swimming well ")
         f4.pack(fill="x", **pad)
+        r0 = ttk.Frame(f4)
+        r0.pack(fill="x", pady=2)
+        ttk.Label(r0, text="Goal:").pack(side="left", padx=(8, 2))
+        self.cb_mode = ttk.Combobox(r0, width=34, state="readonly", values=GOAL_CHOICES)
+        self.cb_mode.current(0)
+        self.cb_mode.pack(side="left", padx=4)
+        self.cb_mode.bind("<<ComboboxSelected>>", lambda e: self._update_dim())
+        ttk.Label(r0, text="   required speed (power goal)").pack(side="left", padx=2)
+        self.e_vmin = ttk.Entry(r0, width=6)
+        self.e_vmin.insert(0, "0.10")
+        self.e_vmin.pack(side="left")
+        ttk.Label(r0, text="m/s").pack(side="left", padx=2)
         r1 = ttk.Frame(f4)
         r1.pack(fill="x", pady=2)
-        ttk.Label(r1, text="Maximise speed, keeping RMS   heading within").pack(
-            side="left", padx=(8, 2))
+        ttk.Label(r1, text="Keeping RMS   heading within").pack(side="left", padx=(8, 2))
         self.e_lh = ttk.Entry(r1, width=5)
         self.e_lh.insert(0, "10")
         self.e_lh.pack(side="left")
@@ -302,11 +317,20 @@ class App:
         if min(lh, lr, lp) <= 0:
             return "(limits must be positive)"
         off = [n for n, v in (("heading", lh), ("roll", lr), ("pitch", lp)) if v >= 90]
-        parts = ["Now: fastest gait whose RMS heading, roll and pitch stay inside the limits"]
+        if self.cb_mode.get().startswith("power"):
+            try:
+                vmin = float(self.e_vmin.get())
+            except ValueError:
+                return "(the required speed is not a number)"
+            parts = [f"Now: least mean power that still swims {vmin:g} m/s, straight and "
+                     f"level within the limits"]
+        else:
+            parts = ["Now: fastest gait whose RMS heading, roll and pitch stay inside "
+                     "the limits"]
         if off:
             parts.append(f"{' and '.join(off)} effectively unlimited -- expect "
                          f"{'veering' if 'heading' in off else 'rolling or rocking'}")
-        if we > 0:
+        if we > 0 and not self.cb_mode.get().startswith("power"):
             parts.append(f"minus {we} BL/s per watt of mean power")
         return "; ".join(parts)
 
@@ -325,6 +349,8 @@ class App:
             from simulate import DEFAULT_LIMITS
             c = load_cfg(self.cfg_path)
             lim = dict(DEFAULT_LIMITS, **c.get("limits", {}))
+            servo = (c.get("servo") or {}).get("max_speed_dps", 400)
+            obj = c.get("objective") or {}
             for entry, value in [(self.e_budget, c.get("budget", 250)),
                                  (self.e_time, c.get("sim_time", 8.0)),
                                  (self.e_pop, c.get("popsize", 10)),
@@ -332,10 +358,17 @@ class App:
                                  (self.e_lh, lim["heading_deg"]),
                                  (self.e_lr, lim["roll_deg"]),
                                  (self.e_lp, lim["pitch_deg"]),
-                                 (self.e_wene, c.get("w_energy", 0.0))]:
+                                 (self.e_wene, c.get("w_energy", 0.0)),
+                                 (self.e_servo, servo if servo else 0),
+                                 (self.e_vmin, obj.get("min_speed", 0.10))]:
                 entry.delete(0, "end")
                 entry.insert(0, str(value))
             g = c.get("gait", {})
+            fam = g.get("family") or "free"
+            self.cb_family.set(next((ch for ch in FAMILY_CHOICES
+                                     if ch.split()[0] == fam), FAMILY_CHOICES[0]))
+            self.cb_mode.set(GOAL_CHOICES[1] if obj.get("mode") == "power"
+                             else GOAL_CHOICES[0])
             fr = g.get("freq_range", [0.2, 2.5])
             ar = g.get("amp_range", [0.0, 0.9])
             orr = g.get("offset_range", [-0.5, 0.5])
@@ -362,6 +395,12 @@ class App:
                        "roll_deg": float(self.e_lr.get()),
                        "pitch_deg": float(self.e_lp.get())}
         c["w_energy"] = float(self.e_wene.get())
+        servo = float(self.e_servo.get())
+        c["servo"] = {"max_speed_dps": servo if servo > 0 else None}
+        if self.cb_mode.get().startswith("power"):
+            c["objective"] = {"mode": "power", "min_speed": float(self.e_vmin.get())}
+        else:
+            c["objective"] = {"mode": "speed"}
         g = c.setdefault("gait", {})
         g["freq_range"] = [float(self.e_f0.get()), float(self.e_f1.get())]
         g["amp_range"] = [0.0, float(self.e_amax.get())]
@@ -370,7 +409,9 @@ class App:
         g["optimize"] = {"freq": self.v_freq.get(), "duty": self.v_duty.get(),
                          "amp": self.v_amp.get(), "phase": self.v_phase.get(),
                          "offset": self.v_off.get()}
-        g["preset_phase"] = self.cb_preset.get().split()[0]
+        fam = self.cb_family.get().split()[0]
+        g["family"] = None if fam == "free" else fam
+        g.pop("preset_phase", None)
         with open(RUN_CFG, "w", encoding="utf-8") as fh:
             json.dump(c, fh, ensure_ascii=False, indent=1)
         return RUN_CFG
@@ -523,7 +564,8 @@ class App:
         if len(self.hist) < 2:
             c.create_text(W / 2, H / 2, text="waiting for data...", fill="#888")
             return
-        pts_ok = [(x, y) for x, y in self.hist if y > -1.0]      # drop diverged runs
+        # only feasible gaits: infeasible and diverged ones sit at or below -1000
+        pts_ok = [(x, y) for x, y in self.hist if y > -999.0]
         if len(pts_ok) < 2:
             c.create_text(W / 2, H / 2,
                           text="waiting for valid data (early runs often diverge)",
@@ -562,20 +604,21 @@ class App:
         c.create_text(mL + 6, mT + 8, text="fitness (higher is better)", anchor="w",
                       fill="#999", font=("", 9))
 
-    def _best_swimmer(self, cfg_file):
-        """A Swimmer for the current run config, rebuilt only when that file changes.
+    def _best_swimmer(self, cfg_file, best):
+        """A Swimmer to decode `best`, rebuilt only when the inputs change.
 
-        This runs on every new record during a search, and rebuilding the model each
-        time made the window stutter.
+        It uses the result's own gait family, whatever the panel now says: the same
+        numbers mean a different gait under a different family. It runs on every new
+        record during a search, and rebuilding the model each time made the window
+        stutter, hence the cache.
         """
-        stamp = os.path.getmtime(cfg_file)
+        key = (cfg_file, os.path.getmtime(cfg_file), best.get("family"))
         cached = getattr(self, "_sw_cache", None)
-        if cached and cached[0] == (cfg_file, stamp):
+        if cached and cached[0] == key:
             return cached[1]
-        from simulate import Swimmer, load_cfg
-        c = load_cfg(cfg_file)
-        sw = Swimmer(c["model"], c)
-        self._sw_cache = ((cfg_file, stamp), sw)
+        from simulate import load_cfg, swimmer_for_result
+        sw = swimmer_for_result(load_cfg(cfg_file), best)
+        self._sw_cache = (key, sw)
         return sw
 
     def _show_best(self):
@@ -583,9 +626,13 @@ class App:
             import numpy as np
             with open("results/best.json", encoding="utf-8") as fh:
                 b = json.load(fh)
-            sw = self._best_swimmer(RUN_CFG if os.path.exists(RUN_CFG) else self.cfg_path)
+            sw = self._best_swimmer(RUN_CFG if os.path.exists(RUN_CFG) else self.cfg_path, b)
             p = sw.gait.decode(b["x"])
             ok = b.get("feasible")
+            st = sw.gait.structure(b["x"])
+            kind = (f"   {st['nearest_common']}-like" + (
+                "" if st["deviation"] < 0.01 else f" (off {st['deviation']*100:.0f}%)")
+                if st else "")
             self.lb_freq.config(text=f"{p['freq']:.2f} Hz   "
                                      f"{b.get('speed', 0):+.4f} m/s   RMS heading "
                                      f"{b.get('heading_rms', 0):.1f}, roll "
@@ -593,7 +640,7 @@ class App:
                                      f"{b.get('pitch_rms', 0):.1f} deg   "
                                      f"{b.get('power', 0):.1f} W   "
                                      + ("within limits" if ok else
-                                        "OVER LIMIT" if ok is not None else ""))
+                                        "OVER LIMIT" if ok is not None else "") + kind)
             for it in self.tv.get_children():
                 self.tv.delete(it)
             for i, nm in enumerate(sw.gait.names):

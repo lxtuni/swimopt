@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from conftest import make_swimmer, write_mjcf
-from simulate import Swimmer, record_best, strip_jsonc
+from simulate import INFEASIBLE, Swimmer, record_best, strip_jsonc
 import json
 
 
@@ -69,9 +69,10 @@ def test_attitude_and_heading_extraction(cfg):
             abs(np.arctan2(R[2, 1], R[2, 2])))
 
 
-def test_best_record_replays_the_same_gait_after_a_preset_change(cfg):
+def test_best_record_holds_the_full_vector_and_its_family(cfg):
     """best.json used to hold only the optimized subset, so changing the phase preset
-    after a run silently replayed a different gait."""
+    after a run silently replayed a different gait. It now holds every parameter and
+    the gait family (replay under that family: see test_families.py)."""
     c = copy.deepcopy(cfg)
     c["gait"]["optimize"] = {"freq": True, "duty": True, "amp": True,
                              "phase": False, "offset": False}
@@ -79,12 +80,7 @@ def test_best_record_replays_the_same_gait_after_a_preset_change(cfg):
     run = make_swimmer(c)
     x = run.gait.x0_opt() + 0.1
     rec = record_best(run.rollout(x), x, run.gait)
-    assert len(rec["x"]) == run.gait.dim and rec["preset"] == "diag"
-
-    c["gait"]["preset_phase"] = "wave"
-    later = make_swimmer(c)
-    assert np.allclose(later.gait.decode(rec["x"])["PH"][0],
-                       run.gait.decode(x)["PH"][0])
+    assert len(rec["x"]) == run.gait.dim and rec["family"] == "diag"
 
 
 def test_body_length_is_measured_in_the_world_frame(cfg):
@@ -114,13 +110,13 @@ def test_inside_the_limits_only_speed_counts(cfg):
     assert r["fitness"] == pytest.approx(0.5 / 5.0 / sw.body_len)
 
 
-def test_excess_over_a_limit_costs_one_body_length_per_100_percent(cfg):
+def test_excess_over_a_limit_puts_a_gait_in_the_infeasible_band(cfg):
     sw = make_swimmer(cfg, limits={"heading_deg": 10, "roll_deg": 10, "pitch_deg": 15})
     r = sw.score(dist=0.5, yaw_drift=0.0, energy=0.0, roll_rms=math.radians(15),
                  pitch_rms=0.0, heading_rms=math.radians(20), duration=5.0)
     assert not r["feasible"]
     assert r["penalty"] == pytest.approx(0.5 + 1.0)          # roll +50 %, heading +100 %
-    assert r["fitness"] == pytest.approx(r["bl_s"] - 1.5)
+    assert r["fitness"] == pytest.approx(INFEASIBLE - 1.5)
 
 
 def test_a_feasible_gait_beats_a_faster_infeasible_one(cfg):
@@ -131,6 +127,32 @@ def test_a_feasible_gait_beats_a_faster_infeasible_one(cfg):
     fast_bad = sw.score(dist=3.0, yaw_drift=0, energy=0, roll_rms=0.7, pitch_rms=0.2,
                         heading_rms=0.8, duration=8.0)
     assert slow_ok["fitness"] > fast_bad["fitness"]
+
+
+def test_no_speed_buys_its_way_out_of_the_limits(cfg):
+    """The old soft penalty assumed nothing swims faster than 1 BL/s; unconstrained
+    gaits here reach 5. Feasibility now comes first."""
+    sw = make_swimmer(cfg)
+    ok = sw.score(dist=0.1, yaw_drift=0, energy=0, roll_rms=0.01, pitch_rms=0.01,
+                  heading_rms=0.01, duration=8.0)
+    rocket = sw.score(dist=40.0, yaw_drift=0, energy=0, roll_rms=0.01, pitch_rms=0.01,
+                      heading_rms=math.radians(10.5), duration=8.0)   # 5 % over, 20 BL/s
+    assert rocket["bl_s"] > 10 and not rocket["feasible"]
+    assert ok["fitness"] > rocket["fitness"]
+
+
+def test_power_goal_minimizes_power_at_the_required_speed(cfg):
+    sw = make_swimmer(cfg, objective={"mode": "power", "min_speed": 0.1})
+    fast_cheap = sw.score(dist=0.8, yaw_drift=0, energy=16.0, roll_rms=0.01,
+                          pitch_rms=0.01, heading_rms=0.01, duration=8.0)   # 0.1 m/s, 2 W
+    fast_dear = sw.score(dist=0.8, yaw_drift=0, energy=40.0, roll_rms=0.01,
+                         pitch_rms=0.01, heading_rms=0.01, duration=8.0)    # 5 W
+    too_slow = sw.score(dist=0.4, yaw_drift=0, energy=1.0, roll_rms=0.01,
+                        pitch_rms=0.01, heading_rms=0.01, duration=8.0)     # 0.05 m/s
+    assert fast_cheap["fitness"] == pytest.approx(-2.0)
+    assert fast_cheap["fitness"] > fast_dear["fitness"] > too_slow["fitness"]
+    assert not too_slow["feasible"] and too_slow["penalty"] == pytest.approx(0.5)
+    assert "least mean power" in sw.info()
 
 
 def test_old_weight_keys_are_flagged(cfg):

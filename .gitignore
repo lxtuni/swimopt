@@ -20,6 +20,7 @@ robots/*.obj
 results/
 results_*/
 *.log
+*.err
 MUJOCO_LOG.TXT
 _ui_run.json
 _cmp_*.json

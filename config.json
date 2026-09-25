@@ -25,6 +25,15 @@
   "vmax_guard":   5.0,     // divergence guard: above this speed the run is aborted
                            // and given the worst possible score
 
+  // Servos cannot move arbitrarily fast. Each servo gets a DC motor's torque-speed
+  // curve: full stall torque (the actuator's forcerange) at rest, falling linearly to
+  // zero at this no-load speed. Without it the optimizer asked for 2700-4200 deg/s,
+  // five to ten times a hobby servo, and that gait stops dead on real servos. Set it
+  // to your servos' rated no-load speed; null switches the limit off.
+  "servo": {
+    "max_speed_dps": 400
+  },
+
   // --------------------------------------------------------------------------
   //  3. Objective. This is what "swimming well" means.
   //
@@ -47,6 +56,15 @@
   },
   "w_energy": 0.0,       // power penalty, in body lengths/s per watt. 0 = speed only;
                          // raise it when optimizing cost of transport
+
+  // What to optimize. "speed": the fastest gait within the limits. "power": the least
+  // mean power that still reaches min_speed within the limits -- one point of the
+  // speed-power trade-off; tools/pareto.py sweeps min_speed. In both, feasibility
+  // comes first: no out-of-limit gait can outscore one inside the limits.
+  "objective": {
+    "mode": "speed",
+    "min_speed": 0.10    // m/s, used by the power goal only
+  },
 
   // --------------------------------------------------------------------------
   //  4. Search budget.
@@ -128,6 +146,13 @@
   //               + H * (amplitude groups + actuators) + offset groups
   // --------------------------------------------------------------------------
   "gait": {
+    // Gait family. null: every actuator has its own phase (35 dims on toy_quad), so
+    // the search can find any coordination. A family fixes the legs' timing and
+    // searches only one phase per joint type, shared by all legs (17 dims):
+    //   "trot" (diag)  "pace" (lr)  "bound" (fb)  "walk" (wave)  "pronk" (inphase)
+    // Legs and joint types are read from the model's geometry, not from names.
+    // tools/gait_families.py compares every family, each at its own best stroke.
+    "family":       null,
     "harmonics":    2,           // 2 lets the flipper feather (spread, then furl).
                                  // NOT required for net thrust on toy_quad: 1 still
                                  // swims 0.16-0.30 m/s. May matter for a leg with one
@@ -141,7 +166,9 @@
                                  // the legs swing around
     "amp2_scale":   1.0,         // scales the second-harmonic amplitude limit;
                                  // set 0.5 to keep the second harmonic small
-    "ramp_t":       1.5,         // ramp-in time, s, so the robot does not lurch at t=0
+    "ramp_t":       1.5,         // ramp-in time, s, so the robot does not lurch at t=0.
+                                 // Simulated but not scored: speed is measured on the
+                                 // steady gait that follows
 
     // Grouping: actuators whose name contains `match` share amp/offset, which lowers
     // the dimension. Phase is always independent per actuator.

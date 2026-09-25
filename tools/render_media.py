@@ -65,7 +65,7 @@ def render_sim(use_demo=False, stem=None, best_path=None, lift=False):
         x, label = view_mod.demo_params(sw.gait), "demo gait"
         stem = stem or "gait_demo"
     else:
-        x, label = view_mod.load_gait(sw, ["config.json", best_path or "results/best.json"])
+        sw, x, label = view_mod.load_result(cfg, best_path or "results/best.json")
         stem = stem or "gait_optimized"
     x = sw.gait.expand(x)
     r = sw.rollout(x)
@@ -79,30 +79,28 @@ def render_sim(use_demo=False, stem=None, best_path=None, lift=False):
     model.vis.global_.offheight = max(model.vis.global_.offheight, HEIGHT)
 
     m, d = model, sw.data
-    p = sw.gait.decode(x)
-    mujoco.mj_resetData(m, d)
     dt = m.opt.timestep
-    n_settle = int(sw.settle / dt)
     steps_per_frame = max(1, int(round(1.0 / (GIF_FPS * dt))))
-    n_frames = int(GIF_SECONDS * GIF_FPS)
 
     os.makedirs(DOCS, exist_ok=True)
     frames = []
     with mujoco.Renderer(m, height=HEIGHT, width=WIDTH) as renderer:
-        for _ in range(n_settle):       # let it float up before filming
-            sw.hydro.apply(d)
-            mujoco.mj_step(m, d)
-        cam = _camera(d, sw.trunk_id, sw.body_len)
-        for _ in range(n_frames):
-            for _ in range(steps_per_frame):
-                t = d.time - sw.settle
-                d.ctrl[:] = sw.gait.ctrl(p, max(0.0, t))
-                sw.hydro.apply(d)
-                mujoco.mj_step(m, d)
-            cam.lookat[:] = d.xpos[sw.trunk_id]      # follow the robot
-            cam.lookat[2] -= 0.10 * sw.body_len
-            renderer.update_scene(d, camera=cam)
+        cam = [None]
+
+        # Film the steady gait only: the rollout's own loop runs the settle and the
+        # ramp-in, with the same servo model and physics that scored it.
+        def on_step(k, phase):
+            if phase != "run" or k % steps_per_frame:
+                return True
+            if cam[0] is None:
+                cam[0] = _camera(d, sw.trunk_id, sw.body_len)
+            cam[0].lookat[:] = d.xpos[sw.trunk_id]      # follow the robot
+            cam[0].lookat[2] -= 0.10 * sw.body_len
+            renderer.update_scene(d, camera=cam[0])
             frames.append(renderer.render().copy())
+            return True
+
+        sw.rollout(x, on_step=on_step, duration=GIF_SECONDS)
 
     from PIL import Image
     still = Image.fromarray(frames[len(frames) // 3])

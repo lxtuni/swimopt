@@ -41,7 +41,7 @@ def rollout_view(sw, x, viewer=None, realtime=False, render_every=8):
         viewer.sync()
         if not viewer.is_running():
             return False
-        if realtime and phase == "run":
+        if realtime and phase != "settle":
             lag = k * dt - (time.time() - t_wall)
             if lag > 0:
                 time.sleep(lag)
