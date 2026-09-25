@@ -4,6 +4,10 @@ Compare gait families, each at its own best stroke.
 
     python tools/gait_families.py [evaluations] [--seeds N] [--lift]
                                   [--families free,diag,lr,fb,wave,inphase]
+                                  [--limits HEADING,ROLL,PITCH]
+
+--limits overrides the RMS attitude limits in degrees, e.g. --limits 10,5,5 for a
+stricter level; results then go to results_families_lim10-5-5/ (plus _lift).
 
 For each family the legs keep that family's timing -- trot, pace, bound, walk, pronk --
 and the search tunes everything else: frequency, duty cycle, amplitudes, offsets, and
@@ -36,15 +40,18 @@ def _arg(args, name, default=None):
     return args[args.index(name) + 1] if name in args else default
 
 
-def family_cfg(base, family, lift):
+def family_cfg(base, family, lift, limits=None):
     c = copy.deepcopy(base)
+    if limits:
+        c["limits"] = dict(c.get("limits") or {}, heading_deg=limits[0], roll_deg=limits[1],
+                           pitch_deg=limits[2])
     c["hydro"]["lift"] = lift
     c["gait"]["family"] = None if family == "free" else family
     c["gait"].pop("preset_phase", None)
     return c
 
 
-def run(base, family, seed, budget, lift, out):
+def run(base, family, seed, budget, lift, out, limits=None):
     d = os.path.join(out, f"{family}_s{seed}")
     done = os.path.join(d, "done.json")
     if os.path.exists(done):
@@ -52,7 +59,7 @@ def run(base, family, seed, budget, lift, out):
         if b.get("_budget") == budget:
             print(f"  {family} seed {seed}: already done")
             return b
-    c = family_cfg(base, family, lift)
+    c = family_cfg(base, family, lift, limits)
     c.update(outdir=d, seed=seed)
     os.makedirs(d, exist_ok=True)
     path = os.path.join(d, "_cfg.json")
@@ -79,15 +86,17 @@ def main():
     seeds = int(_arg(args, "--seeds", 3))
     lift = "--lift" in args
     fams = _arg(args, "--families", ",".join(DEFAULT)).split(",")
-    out = os.path.join(ROOT, "results_families" + ("_lift" if lift else ""))
+    limits = [float(v) for v in _arg(args, "--limits").split(",")] if "--limits" in args else None
+    tag = "_lim" + "-".join(f"{v:g}" for v in limits) if limits else ""
+    out = os.path.join(ROOT, "results_families" + tag + ("_lift" if lift else ""))
     base = load_cfg(os.path.join(ROOT, "config.json"))
 
-    won = {(f, s): run(base, f, s, budget, lift, out) for f in fams
+    won = {(f, s): run(base, f, s, budget, lift, out, limits) for f in fams
            for s in range(1, seeds + 1)}
 
     rows = {}
     for f in fams:
-        c = family_cfg(base, f, lift)
+        c = family_cfg(base, f, lift, limits)
         sw = Swimmer(c["model"], c)
         rs = []
         for s in range(1, seeds + 1):
@@ -104,7 +113,9 @@ def main():
 
     W = 18
     print(f"\n\n{'='*112}\n  GAIT FAMILIES: mean ± sd over {seeds} seeds, {budget} evaluations each"
-          f"{', lift on' if lift else ''}\n{'='*112}")
+          f"{', lift on' if lift else ''}"
+          f"{', limits heading/roll/pitch %g/%g/%g deg' % tuple(limits) if limits else ''}"
+          f"\n{'='*112}")
     print(f"{'family':<18}{'speed m/s':>{W}}{'freq Hz':>{W}}{'duty':>{W}}{'power W':>{W}}"
           f"{'COT J/m':>{W}}{'feasible':>10}")
     for f, rs in rows.items():
@@ -123,7 +134,8 @@ def main():
                               "roll_rms", "pitch_rms", "peak_joint_speed", "surfacing",
                               "feasible", "nearest", "deviation")} for r in rs]
                for f, rs in rows.items()}
-    json.dump({"budget": budget, "seeds": seeds, "lift": lift, "families": summary},
+    json.dump({"budget": budget, "seeds": seeds, "lift": lift, "limits": limits,
+               "families": summary},
               open(os.path.join(out, "summary.json"), "w", encoding="utf-8"), indent=1)
     print(f"\nwritten {os.path.relpath(os.path.join(out, 'summary.json'), ROOT)}")
 
