@@ -75,7 +75,7 @@ class Swimmer:
 
     def _setup_actuation(self, servo_cfg):
         m = self.model
-        # Servo speed limit, as a per-step bound on how far the command may move.
+        # Servo speed limit: the no-load speed of the DC-motor model (see _add_back_emf).
         rate = servo_cfg.get("max_speed_dps", 400)
         self.servo_speed = float(rate) if rate else None
         limited = m.actuator_ctrllimited.astype(bool)

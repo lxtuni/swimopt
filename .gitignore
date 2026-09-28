@@ -34,3 +34,7 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# thesis notes: figure copies are duplicates of docs/
+thesis_notes/figures/*
+!thesis_notes/figures/README.md
