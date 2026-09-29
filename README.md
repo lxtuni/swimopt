@@ -204,7 +204,12 @@ the no-load speed by the flow or by the neighbouring link, as a real geared serv
 be back-driven; the tests check that the motor is then braking, never driving.
 
 Every rollout reports the peak joint speed and the share of time a servo sits at its
-torque limit.
+torque limit. It also reports the **electrical power** the same motor model implies,
+`max(tau*w, 0) + tau^2 * wmax / ts` summed over servos: shaft power when driving plus
+the copper loss `R i^2`, which needs no new parameter because `R / kt^2 = wmax / ts`
+for a motor with stall torque `ts` and no-load speed `wmax`. Optimization targets
+mechanical power; on every result here the electrical figure is within about 30 % of
+it (70 % for the saturated resistive trot) and no gait ranking changes.
 
 ### Drag-based and lift-based propulsion
 
