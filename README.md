@@ -411,16 +411,18 @@ study with roll and pitch held to 5 degrees RMS.
 
 - **Resistive only**, bound's pitch-heavy stroke loses its lead (0.16 m/s) and no
   family clearly wins: walk 0.21 ± 0.09, pace 0.19 ± 0.06, trot 0.17 ± 0.01 m/s.
-- **With lift**, every one of the 12 winners is lift-driven again, and **both
-  free-phase searches converge towards a trot** (the diagonal gait, FL+BR against
-  FR+BL), 14 and 17 % of a stroke off, though slowly (0.05 to 0.07 m/s). The trot
-  family's second seed swims 0.221 m/s on 1.03 W without ever saturating a servo,
-  about 4.7 J/m, the cheapest of all the winners above 0.2 m/s. Bound is still the
-  fastest with lift (0.40 m/s on one seed, 0.19 on the other), at six times the power.
+- **With lift**, every winner is lift-driven again, and **both free-phase searches
+  converge towards a trot** (the diagonal gait, FL+BR against FR+BL), 14 and 17 % of a
+  stroke off, though slowly (0.05 to 0.07 m/s). Over five seeds, bound is the fastest
+  (0.295 ± 0.139 m/s, up to 0.48) at about 15 J/m with the servos saturated; trot draws
+  the least power (1.23 ± 0.90 W) but is also the slowest (0.139 ± 0.051 m/s), so its
+  low cost per metre is confounded with speed. One trot seed swims 0.221 m/s on
+  1.03 W (4.7 J/m), cheaper than any pace or bound winner at a similar speed, but
+  "the diagonal gait is more efficient" needs a matched-speed comparison to settle.
 
 <img src="docs/gait_trot_strict_lift.gif" width="50%" alt="Lift-based trot, roll and pitch within 5 degrees">
 
-Two seeds per family; the spreads are wide, so read these as tendencies.
+Five seeds for trot, pace and bound with lift, two otherwise; the spreads are wide, so read these as tendencies.
 
 ### Describing a gait
 
