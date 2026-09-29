@@ -5,10 +5,14 @@ Speed against power: the least power each physics needs to swim at a given speed
     python tools/pareto.py [evaluations] [--seeds N] [--speeds 0.10,0.20,0.30]
                            [--families diag,lr,fb,wave,inphase] [--surfacing 0.05]
                            [--physics drag,lift] [--limits HEADING,ROLL,PITCH]
+                           [--lift-share 0.1]
 
 --limits overrides the RMS attitude limits (degrees); such a study goes to
 results_pareto_lim<H>-<R>-<P>/ and docs/pareto_lim<H>-<R>-<P>.png. --physics picks
 which physics to run, e.g. --physics lift to compare gait families under lift only.
+--lift-share caps the lift force's share of the forward impulse: with --physics lift it
+forces drag-based strokes under the lift model, the within-model counterpart of the
+unconstrained lift runs (results go to results_pareto<...>_ls<share>/).
 
 For every target speed v, for resistive-only and for lift-augmented physics, and for
 every gait family, it minimizes mean power subject to: speed >= v, the straight-and-
@@ -48,6 +52,7 @@ MARK = {"drag": "o", "lift": "s"}        # shape as well as colour
 LABEL = {"drag": "resistive only", "lift": "resistive + lift"}
 SURFACE, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
 LIMITS = None                            # set by --limits: [heading, roll, pitch] degrees
+LIFT_SHARE = None                        # set by --lift-share
 KEEP = ("speed", "bl_s", "power", "heading_rms", "roll_rms", "pitch_rms", "thrust_lift",
         "thrust_drag", "lift_share", "peak_joint_speed", "torque_sat", "surfacing", "feasible")
 
@@ -65,6 +70,8 @@ def study_cfg(base, lift, family, v, surfacing):
     c["limits"] = dict(c.get("limits") or {}, surfacing=surfacing)
     if LIMITS:
         c["limits"].update(heading_deg=LIMITS[0], roll_deg=LIMITS[1], pitch_deg=LIMITS[2])
+    if LIFT_SHARE is not None:
+        c["limits"]["lift_share"] = LIFT_SHARE
     return c
 
 
@@ -134,6 +141,7 @@ def plot(pts, env, out, physics=PHYSICS):
     ax.set_xlabel("speed (m/s)", fontsize=9, color=INK2)
     ax.set_ylabel("least mean power (W)", fontsize=9, color=INK2)
     lim = f", roll/pitch within {LIMITS[1]:g}/{LIMITS[2]:g} deg" if LIMITS else ""
+    lim += f", lift share <= {LIFT_SHARE:g} (drag-based strokes)" if LIFT_SHARE is not None else ""
     ax.set_title(f"Least power to swim straight, level and submerged at each speed{lim}\n"
                  "line: best over all gait families; faint: every family's optimum",
                  loc="left", fontsize=10, color=INK)
@@ -143,12 +151,15 @@ def plot(pts, env, out, physics=PHYSICS):
 
 
 def main():
-    global OUT, LIMITS
+    global OUT, LIMITS, LIFT_SHARE
     os.chdir(ROOT)
     args = sys.argv[1:]
     if "--limits" in args:
         LIMITS = [float(v) for v in _arg(args, "--limits").split(",")]
+    if "--lift-share" in args:
+        LIFT_SHARE = float(_arg(args, "--lift-share"))
     tag = "_lim" + "-".join(f"{v:g}" for v in LIMITS) if LIMITS else ""
+    tag += f"_ls{LIFT_SHARE:g}" if LIFT_SHARE is not None else ""
     OUT = os.path.join(ROOT, "results_pareto" + tag)
     sel = _arg(args, "--physics", "drag,lift").split(",")
     physics = tuple(pl for pl in PHYSICS if pl[0] in sel)
@@ -204,7 +215,7 @@ def main():
 
     os.makedirs(OUT, exist_ok=True)
     json.dump({"budget": budget, "seeds": seeds, "families": fams, "surfacing": surfacing,
-               "limits": LIMITS, "physics": [p for p, _ in physics],
+               "limits": LIMITS, "lift_share": LIFT_SHARE, "physics": [p for p, _ in physics],
                "speeds": speeds, "envelope": env, "points": pts},
               open(os.path.join(OUT, "summary.json"), "w", encoding="utf-8"), indent=1)
     os.makedirs(os.path.join(ROOT, "docs"), exist_ok=True)

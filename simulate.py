@@ -55,6 +55,11 @@ class Swimmer:
         # the surface is outside what it can predict. None = not enforced.
         surf = lim.get("surfacing")
         self.surfacing_limit = None if surf is None else float(surf)
+        # Optional cap on the lift force's share of the forward impulse. Under lift
+        # physics this forces a drag-based stroke, so lift-based and drag-based gaits
+        # can be compared inside one model rather than across two.
+        ls = lim.get("lift_share")
+        self.lift_share_limit = None if ls is None else float(ls)
         self.w_energy = float(cfg.get("w_energy", 0.0))     # per watt, in BL/s
         self.legacy_weights = [k for k in ("w_yaw", "w_attitude") if k in cfg]
         # What to optimize. "speed": fastest within the limits. "power": least mean
@@ -297,13 +302,15 @@ class Swimmer:
         # net displacement projected on the initial heading, so circling scores badly
         fwd = self._forward_dir(yaw0)
         dist = float(disp[:2] @ fwd)
+        split = self.thrust_split(fwd)
         res = self.score(dist=dist, yaw_drift=yaw_drift, energy=energy,
                          roll_rms=math.sqrt(roll_sq / n_steps),
                          pitch_rms=math.sqrt(pitch_sq / n_steps),
                          heading_rms=math.sqrt(head_sq / n_steps),
                          roll_max=roll_max, pitch_max=pitch_max, traj=traj,
-                         duration=span, surfacing=n_surf / n_steps)
-        res.update(self.thrust_split(fwd))
+                         duration=span, surfacing=n_surf / n_steps,
+                         lift_share=split["lift_share"])
+        res.update(split)
         res.update(peak_joint_speed=math.degrees(peak_w), torque_sat=n_sat / n_steps,
                    surfacing=n_surf / n_steps,
                    power_el=(energy_el / res["duration"]) if self.servo_speed else float("nan"))
@@ -326,7 +333,8 @@ class Swimmer:
 
     # ---------- scoring ----------
     def score(self, dist, yaw_drift, energy, roll_rms, pitch_rms, heading_rms=0.0,
-              roll_max=0.0, pitch_max=0.0, traj=None, duration=None, surfacing=0.0):
+              roll_max=0.0, pitch_max=0.0, traj=None, duration=None, surfacing=0.0,
+              lift_share=0.0):
         """Turn one rollout's raw measurements into a fitness and a result dict.
 
 Feasibility comes first. A gait is feasible when its RMS heading, roll and pitch
@@ -355,6 +363,9 @@ Feasibility comes first. A gait is feasible when its RMS heading, roll and pitch
         if self.surfacing_limit is not None:
             penalty += (max(0.0, surfacing - self.surfacing_limit)
                         / max(self.surfacing_limit, 0.01))
+        if self.lift_share_limit is not None:
+            penalty += (max(0.0, lift_share - self.lift_share_limit)
+                        / max(self.lift_share_limit, 0.01))
         if self.mode == "power":
             if self.min_speed > 0:
                 penalty += max(0.0, self.min_speed - speed) / self.min_speed

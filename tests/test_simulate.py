@@ -166,6 +166,25 @@ def test_surfacing_limit_is_optional_and_enforced_when_set(cfg):
     assert not r["feasible"] and r["penalty"] == pytest.approx(1.0)   # 100 % over
 
 
+def test_lift_share_limit_forces_a_drag_based_stroke(cfg):
+    """Under lift physics, capping the lift force's share of the forward impulse is
+    how a drag-based gait is asked for inside the same model."""
+    free = make_swimmer(cfg)
+    kw = dict(dist=0.8, yaw_drift=0, energy=0, roll_rms=0.01, pitch_rms=0.01,
+              heading_rms=0.01, duration=8.0)
+    assert free.score(lift_share=0.5, **kw)["feasible"]          # reported only
+    held = make_swimmer(cfg, limits={"lift_share": 0.1})
+    assert held.score(lift_share=0.08, **kw)["feasible"]
+    r = held.score(lift_share=0.3, **kw)
+    assert not r["feasible"] and r["penalty"] == pytest.approx(2.0)   # 200 % over
+    c = copy.deepcopy(cfg)
+    c["hydro"]["lift"] = True
+    c["limits"] = dict(c.get("limits") or {}, lift_share=0.1)
+    sw = make_swimmer(c)
+    res = sw.rollout(sw.gait.x0())
+    assert 0.0 <= res["lift_share"] <= 1.0 and (res["feasible"] or res["penalty"] > 0)
+
+
 def test_old_weight_keys_are_flagged(cfg):
     c = copy.deepcopy(cfg)
     c["w_yaw"] = 0.3
