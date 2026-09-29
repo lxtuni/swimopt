@@ -12,6 +12,7 @@
 | `gait_diagram.png` | 上图步态的步态图、关节角、速度、姿态 | 实验 2 |
 | `pareto.png` | 各速度下最小功率：仅阻力（蓝，圆点）vs 阻力+升力（橙，方块） | 实验 3 |
 | `pareto_lim10-5-5.png` | 同上，但横滚/俯仰限 5°、只含升力物理，5 个种子 | 实验 4d |
+| `pareto_ls0.1.png` | 含升力的模型里强制阻力型划法时的最小功率 | 实验 5 |
 | `gait_lift.gif` | 升力型 bound，0.30 m/s 下最省功率，0.97 W | 实验 3 |
 | `gait_trot_strict.gif` / `_diagram.png` | 对角步态，横滚/俯仰限 5°，仅阻力，0.181 m/s，8.45 W | 实验 4a |
 | `gait_trot_strict_lift.gif` / `_diagram.png` | 升力型对角步态，限 5°，0.221 m/s，1.03 W，舵机不饱和 | 实验 4b |

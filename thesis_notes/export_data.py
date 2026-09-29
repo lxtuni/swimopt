@@ -33,14 +33,17 @@ STUDIES = {
     "results_families_lim10-5-5_lift": ("families_speed_strict", "valid"),
     "results_pareto": ("speed_power", "valid"),
     "results_pareto_lim10-5-5": ("speed_power_strict", "valid"),
+    "results_pareto_ls0.1": ("speed_power_dragstroke", "valid"),
     # run before the servo model existed: joint speeds of 2700-4200 deg/s
     "results_cmp": ("drag_vs_lift_2x2_preservo", "WITHDRAWN (no servo speed limit)"),
 }
 COLS = ["study", "status", "run", "physics", "family", "seed", "objective", "min_speed",
-        "limit_heading", "limit_roll", "limit_pitch", "limit_surfacing", "servo_dps",
+        "limit_heading", "limit_roll", "limit_pitch", "limit_surfacing",
+        "limit_lift_thrust_share", "servo_dps",
         "budget", "feasible", "speed_m_s", "bl_s", "power_W", "cot_J_m", "power_el_W",
         "cot_el_J_m", "freq_Hz", "duty",
         "heading_rms", "roll_rms", "pitch_rms", "impulse_lift_Ns", "impulse_drag_Ns",
+        "lift_thrust_share",
         "peak_joint_speed_dps", "torque_sat", "surfacing", "nearest_family", "deviation"]
 
 
@@ -63,7 +66,11 @@ def rows():
             x = np.array(b["x"])
             p = g.decode(x)
             st = g.structure(x)
-            pel = float(b["power_el"]) if "power_el" in b else float(cache[key].rollout(x)["power_el"])
+            if "power_el" in b and "lift_thrust_share" in b:
+                pel, lts = float(b["power_el"]), float(b["lift_thrust_share"])
+            else:                       # older runs: replay the winner once
+                r = cache[key].rollout(x)
+                pel, lts = float(r["power_el"]), float(r["lift_thrust_share"])
             lim = c.get("limits") or {}
             obj = c.get("objective") or {}
             spd = float(b["speed"])
@@ -75,6 +82,7 @@ def rows():
                 "min_speed": obj.get("min_speed") if obj.get("mode") == "power" else "",
                 "limit_heading": lim.get("heading_deg"), "limit_roll": lim.get("roll_deg"),
                 "limit_pitch": lim.get("pitch_deg"), "limit_surfacing": lim.get("surfacing"),
+                "limit_lift_thrust_share": lim.get("lift_thrust_share"),
                 "servo_dps": (c.get("servo") or {}).get("max_speed_dps"),
                 "budget": b.get("_budget", c.get("budget")), "feasible": b["feasible"],
                 "speed_m_s": round(spd, 4), "bl_s": round(b["bl_s"], 3),
@@ -87,6 +95,7 @@ def rows():
                 "pitch_rms": round(b["pitch_rms"], 2),
                 "impulse_lift_Ns": round(b.get("thrust_lift", 0.0), 3),
                 "impulse_drag_Ns": round(b.get("thrust_drag", 0.0), 3),
+                "lift_thrust_share": round(lts, 3),
                 "peak_joint_speed_dps": round(b.get("peak_joint_speed", float("nan")), 0),
                 "torque_sat": round(b.get("torque_sat", float("nan")), 3),
                 "surfacing": round(b.get("surfacing", float("nan")), 3),

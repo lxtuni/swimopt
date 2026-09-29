@@ -313,6 +313,38 @@ sense that matters for a thesis. Whenever lift is available the optimizer uses i
 at matched speed and attitude it needs markedly less power. Whether that survives
 contact with the real flipper rests on measuring `cl`.
 
+#### Inside one model: lift-based against drag-based strokes
+
+The table above compares two models. The sharper question is asked inside one: with
+lift in the physics, how much does a **drag-based stroke** cost? Every rollout reports
+`lift_thrust_share`, the lift force's forward impulse over the hull's drag impulse
+(the hydrodynamics track the limbs' drag separately): about 0 for paddling, above 1
+when lift also has to overcome the limbs' own drag. `limits.lift_thrust_share` caps it.
+
+```bash
+python tools/pareto.py 2500 --seeds 2 --physics lift --lift-share 0.1
+```
+
+| required speed | drag-based stroke (share <= 0.1) | lift-based stroke (no cap) |
+|---|---|---|
+| 0.10 m/s | 0.42 W, found by 2 of 10 searches | 0.10 W, 10 of 10 |
+| 0.20 m/s | 5.50 W, 1 of 10 | 0.55 W, 8 of 10 |
+| 0.30 m/s | none found (closest reached 0.26 m/s) | 0.97 W, 4 of 10 |
+
+Same physics, same limits, same seeds: the drag-based stroke needs 4 to 10 times the
+power and does not reach 0.30 m/s. It is also hard to find, so part of that factor may
+be search difficulty; read the direction, not the number.
+
+A related check: the 27 feasible winners of the resistive-only searches, replayed with
+lift switched on, are mostly lift-driven (median share 1.26, 21 of 27 above 0.1) and 26
+of them no longer stay straight and level. Whether a stroke is "drag-based" is a
+property of the physics as much as of the motion: a flipper that crosses the water at
+an angle makes lift whether the model includes it or not.
+
+(An earlier ratio, `lift_share` = |lift| / (|lift| + |all drag|), is still reported but
+is about 0.5 for every gait with lift, because in steady swimming the two impulses
+cancel. Do not use it to classify a gait.)
+
 The earlier study, `tools/compare_lift.py` (fastest gait, drag against lift, with and
 without the attitude limits), still runs; its published numbers predate the servo
 model and are withdrawn.
