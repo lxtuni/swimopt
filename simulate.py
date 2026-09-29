@@ -55,10 +55,10 @@ class Swimmer:
         # the surface is outside what it can predict. None = not enforced.
         surf = lim.get("surfacing")
         self.surfacing_limit = None if surf is None else float(surf)
-        # Optional cap on the lift force's share of the forward impulse. Under lift
+        # Optional cap on the share of the thrust that lift supplies. Under lift
         # physics this forces a drag-based stroke, so lift-based and drag-based gaits
         # can be compared inside one model rather than across two.
-        ls = lim.get("lift_share")
+        ls = lim.get("lift_thrust_share")
         self.lift_share_limit = None if ls is None else float(ls)
         self.w_energy = float(cfg.get("w_energy", 0.0))     # per watt, in BL/s
         self.legacy_weights = [k for k in ("w_yaw", "w_attitude") if k in cfg]
@@ -309,7 +309,7 @@ class Swimmer:
                          heading_rms=math.sqrt(head_sq / n_steps),
                          roll_max=roll_max, pitch_max=pitch_max, traj=traj,
                          duration=span, surfacing=n_surf / n_steps,
-                         lift_share=split["lift_share"])
+                         lift_share=split["lift_thrust_share"])
         res.update(split)
         res.update(peak_joint_speed=math.degrees(peak_w), torque_sat=n_sat / n_steps,
                    surfacing=n_surf / n_steps,
@@ -324,12 +324,22 @@ class Swimmer:
         N*s, positive driving the robot forwards. lift_share is only their magnitude
         ratio, so read it together with the signs. The decomposition is checked
         against momentum conservation by the test suite.
+
+        In steady swimming the two cancel (momentum is conserved), so lift_share sits
+        near 0.5 for any gait with lift and says little. lift_thrust_share separates
+        the hull from the limbs instead: the lift impulse over the hull's drag impulse,
+        i.e. how much of the thrust that holds the hull at speed comes from lift.
+        About 0 for a paddling stroke, above 1 when lift also has to overcome the
+        limbs' own drag, negative when lift opposes the motion.
         """
         drag = float(self.hydro.imp_drag[:2] @ fwd)
         lift = float(self.hydro.imp_lift[:2] @ fwd)
+        drag_limb = float(self.hydro.imp_drag_limb[:2] @ fwd)
+        hull = abs(drag - drag_limb)
         total = abs(drag) + abs(lift)
-        return dict(thrust_drag=drag, thrust_lift=lift,
-                    lift_share=float(abs(lift) / total) if total > 1e-12 else 0.0)
+        return dict(thrust_drag=drag, thrust_lift=lift, thrust_drag_limb=drag_limb,
+                    lift_share=float(abs(lift) / total) if total > 1e-12 else 0.0,
+                    lift_thrust_share=float(lift / hull) if hull > 1e-9 else 0.0)
 
     # ---------- scoring ----------
     def score(self, dist, yaw_drift, energy, roll_rms, pitch_rms, heading_rms=0.0,
@@ -382,6 +392,7 @@ Feasibility comes first. A gait is feasible when its RMS heading, roll and pitch
                     penalty=float(penalty), feasible=penalty == 0.0,
                     energy=float(energy), power=float(power), duration=T,
                     thrust_drag=0.0, thrust_lift=0.0, lift_share=0.0,
+                    thrust_drag_limb=0.0, lift_thrust_share=0.0,
                     traj=traj if traj is not None else [])
 
     def diverged(self, traj=None):

@@ -285,6 +285,7 @@ class HydroModel:
     def reset_impulse(self):
         """Zero the running impulse totals. Call once scoring starts."""
         self.imp_drag = np.zeros(3)    # from the quadratic + viscous resistive terms
+        self.imp_drag_limb = np.zeros(3)   # the part of imp_drag that acts on the limbs
         self.imp_lift = np.zeros(3)    # from the circulatory lift term
 
     def _lift(self, R, v_world, f):
@@ -347,6 +348,7 @@ class HydroModel:
 
         dt = self.m.opt.timestep
         self.imp_drag += F.sum(0) * dt
+        self.imp_drag_limb += F[self.is_limb].sum(0) * dt
         if self.has_lift:
             F_lift = self._lift(R, v, f)
             self.imp_lift += F_lift.sum(0) * dt

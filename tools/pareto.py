@@ -10,8 +10,8 @@ Speed against power: the least power each physics needs to swim at a given speed
 --limits overrides the RMS attitude limits (degrees); such a study goes to
 results_pareto_lim<H>-<R>-<P>/ and docs/pareto_lim<H>-<R>-<P>.png. --physics picks
 which physics to run, e.g. --physics lift to compare gait families under lift only.
---lift-share caps the lift force's share of the forward impulse: with --physics lift it
-forces drag-based strokes under the lift model, the within-model counterpart of the
+--lift-share caps the share of the thrust that lift supplies (lift impulse over the hull's
+drag impulse): with --physics lift it forces drag-based strokes under the lift model, the within-model counterpart of the
 unconstrained lift runs (results go to results_pareto<...>_ls<share>/).
 
 For every target speed v, for resistive-only and for lift-augmented physics, and for
@@ -54,7 +54,7 @@ SURFACE, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
 LIMITS = None                            # set by --limits: [heading, roll, pitch] degrees
 LIFT_SHARE = None                        # set by --lift-share
 KEEP = ("speed", "bl_s", "power", "heading_rms", "roll_rms", "pitch_rms", "thrust_lift",
-        "thrust_drag", "lift_share", "peak_joint_speed", "torque_sat", "surfacing", "feasible")
+        "thrust_drag", "lift_share", "lift_thrust_share", "peak_joint_speed", "torque_sat", "surfacing", "feasible")
 
 
 def _arg(args, name, default=None):
@@ -71,7 +71,7 @@ def study_cfg(base, lift, family, v, surfacing):
     if LIMITS:
         c["limits"].update(heading_deg=LIMITS[0], roll_deg=LIMITS[1], pitch_deg=LIMITS[2])
     if LIFT_SHARE is not None:
-        c["limits"]["lift_share"] = LIFT_SHARE
+        c["limits"]["lift_thrust_share"] = LIFT_SHARE
     return c
 
 

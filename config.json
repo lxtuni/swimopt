@@ -57,10 +57,12 @@
                          // e.g. 0.05. The model has no free-surface physics, so a gait
                          // that rows across the surface is outside what it predicts.
                          // null = reported, not enforced
-    "lift_share":  null  // largest share of the forward impulse the lift force may
-                         // carry, e.g. 0.1. With hydro.lift on this forces a drag-based
-                         // stroke, so lift-based and drag-based gaits can be compared
-                         // inside one model. null = reported, not enforced
+    "lift_thrust_share": null
+                         // largest share of the thrust that lift may supply: the lift
+                         // force's forward impulse over the hull's drag impulse, e.g.
+                         // 0.1. With hydro.lift on this forces a drag-based stroke, so
+                         // lift-based and drag-based gaits can be compared inside one
+                         // model. null = reported, not enforced
   },
   "w_energy": 0.0,       // power penalty, in body lengths/s per watt. 0 = speed only;
                          // raise it when optimizing cost of transport
