@@ -5,7 +5,7 @@
 
 | 列 | 含义 |
 |---|---|
-| `study` | 实验：`free_phase_servo`（实验1）、`families_speed`（实验2）、`speed_power`（实验3）、`families_speed_strict`（实验4）、`drag_vs_lift_2x2_preservo`（已撤回） |
+| `study` | 实验：`free_phase_servo`（实验1）、`families_speed`（实验2）、`speed_power`（实验3）、`families_speed_strict`（实验4a/b/c/e）、`speed_power_strict`（实验4d）、`drag_vs_lift_2x2_preservo`（已撤回） |
 | `status` | `valid` 或 `WITHDRAWN (...)`，撤回的不要引用 |
 | `run` | 结果文件夹 |
 | `physics` | `drag`（仅阻力）或 `drag+lift` |

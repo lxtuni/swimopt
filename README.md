@@ -411,14 +411,23 @@ study with roll and pitch held to 5 degrees RMS.
 
 - **Resistive only**, bound's pitch-heavy stroke loses its lead (0.16 m/s) and no
   family clearly wins: walk 0.21 ± 0.09, pace 0.19 ± 0.06, trot 0.17 ± 0.01 m/s.
-- **With lift**, every winner is lift-driven again, and **both free-phase searches
-  converge towards a trot** (the diagonal gait, FL+BR against FR+BL), 14 and 17 % of a
-  stroke off, though slowly (0.05 to 0.07 m/s). Over five seeds, bound is the fastest
-  (0.295 ± 0.139 m/s, up to 0.48) at about 15 J/m with the servos saturated; trot draws
-  the least power (1.23 ± 0.90 W) but is also the slowest (0.139 ± 0.051 m/s), so its
-  low cost per metre is confounded with speed. One trot seed swims 0.221 m/s on
-  1.03 W (4.7 J/m), cheaper than any pace or bound winner at a similar speed, but
-  "the diagonal gait is more efficient" needs a matched-speed comparison to settle.
+- **With lift**, every winner is lift-driven again. Over five seeds, bound is the
+  fastest (0.295 ± 0.139 m/s, up to 0.48) with the servos saturated; trot (the diagonal
+  gait, FL+BR against FR+BL) draws the least power (1.23 ± 0.90 W) but is also the
+  slowest (0.139 ± 0.051 m/s). Matched-speed least-power searches (5 families x 5 seeds,
+  `tools/pareto.py --physics lift --limits 10,5,5`) separate the two: at 0.10 and
+  0.15 m/s trot is cheapest by a small margin (0.10 vs 0.17 W, 0.48 vs 0.51 W for
+  bound); at 0.20 m/s, near trot's ceiling, pronk and bound need about half its power
+  (0.96 and 0.98 vs 1.68 W). So the diagonal gait is the thrifty low-speed choice
+  here, not a generally more efficient one.
+- **Free-phase searches need a bigger budget than 2500.** At 2500 evaluations the two
+  free winners under these limits reached only 0.05 to 0.07 m/s and happened to lie
+  nearest a trot; at 10000 evaluations three seeds reach 0.22 to 0.37 m/s and all
+  settle on bound- or pronk-like coordination (15 to 19 % of a stroke off), the best of
+  them faster and cheaper than four of the five bound-family winners. Nothing from a
+  2500-evaluation free search is used for any claim.
+
+![Least power at each speed under the stricter limits](docs/pareto_lim10-5-5.png)
 
 <img src="docs/gait_trot_strict_lift.gif" width="50%" alt="Lift-based trot, roll and pitch within 5 degrees">
 

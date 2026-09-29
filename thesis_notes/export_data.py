@@ -30,6 +30,7 @@ STUDIES = {
     "results_families_lim10-5-5": ("families_speed_strict", "valid"),
     "results_families_lim10-5-5_lift": ("families_speed_strict", "valid"),
     "results_pareto": ("speed_power", "valid"),
+    "results_pareto_lim10-5-5": ("speed_power_strict", "valid"),
     # run before the servo model existed: joint speeds of 2700-4200 deg/s
     "results_cmp": ("drag_vs_lift_2x2_preservo", "WITHDRAWN (no servo speed limit)"),
 }

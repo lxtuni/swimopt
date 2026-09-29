@@ -4,6 +4,11 @@ Speed against power: the least power each physics needs to swim at a given speed
 
     python tools/pareto.py [evaluations] [--seeds N] [--speeds 0.10,0.20,0.30]
                            [--families diag,lr,fb,wave,inphase] [--surfacing 0.05]
+                           [--physics drag,lift] [--limits HEADING,ROLL,PITCH]
+
+--limits overrides the RMS attitude limits (degrees); such a study goes to
+results_pareto_lim<H>-<R>-<P>/ and docs/pareto_lim<H>-<R>-<P>.png. --physics picks
+which physics to run, e.g. --physics lift to compare gait families under lift only.
 
 For every target speed v, for resistive-only and for lift-augmented physics, and for
 every gait family, it minimizes mean power subject to: speed >= v, the straight-and-
@@ -42,6 +47,7 @@ COLOR = {"drag": "#2a78d6", "lift": "#eb6834"}
 MARK = {"drag": "o", "lift": "s"}        # shape as well as colour
 LABEL = {"drag": "resistive only", "lift": "resistive + lift"}
 SURFACE, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
+LIMITS = None                            # set by --limits: [heading, roll, pitch] degrees
 KEEP = ("speed", "bl_s", "power", "heading_rms", "roll_rms", "pitch_rms", "thrust_lift",
         "thrust_drag", "lift_share", "peak_joint_speed", "torque_sat", "surfacing", "feasible")
 
@@ -57,6 +63,8 @@ def study_cfg(base, lift, family, v, surfacing):
     c["gait"].pop("preset_phase", None)
     c["objective"] = {"mode": "power", "min_speed": v}
     c["limits"] = dict(c.get("limits") or {}, surfacing=surfacing)
+    if LIMITS:
+        c["limits"].update(heading_deg=LIMITS[0], roll_deg=LIMITS[1], pitch_deg=LIMITS[2])
     return c
 
 
@@ -93,7 +101,7 @@ def replay(base, phys, lift, family, v, surfacing, best, cache):
     return out
 
 
-def plot(pts, env, out):
+def plot(pts, env, out, physics=PHYSICS):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -107,7 +115,7 @@ def plot(pts, env, out):
     ax.tick_params(colors=INK2, labelsize=8.5)
     ax.grid(True, color=GRID, linewidth=0.6)
     ax.set_axisbelow(True)
-    for phys, _ in PHYSICS:
+    for phys, _ in physics:
         feas = [r for r in pts[phys] if r["feasible"]]
         ax.scatter([r["speed"] for r in feas], [r["power"] for r in feas], s=18,
                    marker=MARK[phys], color=COLOR[phys], alpha=0.25, linewidths=0)
@@ -125,7 +133,8 @@ def plot(pts, env, out):
                         ha="center", fontsize=7, color=INK2)
     ax.set_xlabel("speed (m/s)", fontsize=9, color=INK2)
     ax.set_ylabel("least mean power (W)", fontsize=9, color=INK2)
-    ax.set_title("Least power to swim straight, level and submerged at each speed\n"
+    lim = f", roll/pitch within {LIMITS[1]:g}/{LIMITS[2]:g} deg" if LIMITS else ""
+    ax.set_title(f"Least power to swim straight, level and submerged at each speed{lim}\n"
                  "line: best over all gait families; faint: every family's optimum",
                  loc="left", fontsize=10, color=INK)
     ax.margins(x=0.12)
@@ -134,8 +143,15 @@ def plot(pts, env, out):
 
 
 def main():
+    global OUT, LIMITS
     os.chdir(ROOT)
     args = sys.argv[1:]
+    if "--limits" in args:
+        LIMITS = [float(v) for v in _arg(args, "--limits").split(",")]
+    tag = "_lim" + "-".join(f"{v:g}" for v in LIMITS) if LIMITS else ""
+    OUT = os.path.join(ROOT, "results_pareto" + tag)
+    sel = _arg(args, "--physics", "drag,lift").split(",")
+    physics = tuple(pl for pl in PHYSICS if pl[0] in sel)
     budget = next((int(a) for a in args if a.isdigit()), 2000)
     seeds = int(_arg(args, "--seeds", 1))
     speeds = [float(v) for v in _arg(args, "--speeds", "0.10,0.20,0.30").split(",")]
@@ -145,13 +161,13 @@ def main():
 
     # cheapest targets first, so a partial study already yields whole low-speed rows
     won = {(p, f, v, s): run(base, p, lift, f, v, s, budget, surfacing)
-           for v in speeds for p, lift in PHYSICS for f in fams for s in range(1, seeds + 1)}
+           for v in speeds for p, lift in physics for f in fams for s in range(1, seeds + 1)}
 
     cache = {}
-    pts = {p: [] for p, _ in PHYSICS}
-    env = {p: [] for p, _ in PHYSICS}
+    pts = {p: [] for p, _ in physics}
+    env = {p: [] for p, _ in physics}
     for v in speeds:
-        for p, lift in PHYSICS:
+        for p, lift in physics:
             rs = [replay(base, p, lift, f, v, surfacing, won[(p, f, v, s)], cache)
                   for f in fams for s in range(1, seeds + 1)]
             pts[p] += rs
@@ -160,20 +176,20 @@ def main():
 
     print(f"\n\n{'='*100}\n  LEAST POWER AT EACH REQUIRED SPEED  (best of {len(fams)} families x "
           f"{seeds} seed(s), {budget} evaluations each, surfacing <= {surfacing:.0%})\n{'='*100}")
-    print(f"{'speed >=':>9}" + "".join(f"{LABEL[p]:>36}" for p, _ in PHYSICS)
+    print(f"{'speed >=':>9}" + "".join(f"{LABEL[p]:>36}" for p, _ in physics)
           + f"{'lift/drag':>11}")
     for i, v in enumerate(speeds):
         cells = []
-        for p, _ in PHYSICS:
+        for p, _ in physics:
             r = env[p][i]
             cells.append(f"{r['power']:6.2f} W  {COMMON_NAMES[r['family']]:<5} "
                          f"lift imp {r['thrust_lift']:+.2f} N*s" if r else "no feasible gait")
-        d, l = env["drag"][i], env["lift"][i]
+        d, l = env.get("drag", [None] * len(speeds))[i], env.get("lift", [None] * len(speeds))[i]
         ratio = l["power"] / d["power"] if d and l else float("nan")
         print(f"{v:>9.2f}" + "".join(f"{c:>36}" for c in cells) + f"{ratio:>11.2f}")
     print("\nper family (W; '-' = no feasible gait):")
     print(f"{'':>14}" + "".join(f"{COMMON_NAMES[f]:>8}" for f in fams))
-    for p, _ in PHYSICS:
+    for p, _ in physics:
         for v in speeds:
             row = []
             for f in fams:
@@ -186,12 +202,15 @@ def main():
     print("lift/drag = least power with lift / without, at the same required speed; "
           "below 1 means the lift model makes swimming cheaper")
 
+    os.makedirs(OUT, exist_ok=True)
     json.dump({"budget": budget, "seeds": seeds, "families": fams, "surfacing": surfacing,
+               "limits": LIMITS, "physics": [p for p, _ in physics],
                "speeds": speeds, "envelope": env, "points": pts},
               open(os.path.join(OUT, "summary.json"), "w", encoding="utf-8"), indent=1)
     os.makedirs(os.path.join(ROOT, "docs"), exist_ok=True)
-    plot(pts, env, os.path.join(ROOT, "docs", "pareto.png"))
-    print("written results_pareto/summary.json and docs/pareto.png")
+    fig = os.path.join(ROOT, "docs", f"pareto{tag}.png")
+    plot(pts, env, fig, physics)
+    print(f"written {os.path.relpath(OUT, ROOT)}/summary.json and {os.path.relpath(fig, ROOT)}")
 
 
 if __name__ == "__main__":
