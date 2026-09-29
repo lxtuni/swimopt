@@ -103,3 +103,16 @@ def test_validity_metrics_are_reported(cfg):
     assert 0.0 <= r["torque_sat"] <= 1.0 and 0.0 <= r["surfacing"] <= 1.0
     d = sw.diverged()
     assert d["peak_joint_speed"] == d["torque_sat"] == d["surfacing"] == 0.0
+
+
+def test_electrical_power_adds_copper_loss_to_shaft_power(cfg):
+    """A servo pays R*i^2 for torque whether or not the joint moves. With the DC-motor
+    model that is tau^2 * wmax / ts, so the saturated demo gait costs far more
+    electrically than mechanically; without a servo model there is no motor to bill."""
+    sw = make_swimmer(cfg, servo={"max_speed_dps": 400})
+    wmax = np.radians(400)
+    assert np.allclose(sw.copper[sw.back_emf > 0], wmax / sw.tau_stall[sw.back_emf > 0])
+    r = sw.rollout(view.demo_params(sw.gait))
+    assert r["power_el"] > r["power"] > 0
+    off = make_swimmer(cfg, servo={"max_speed_dps": None})
+    assert np.isnan(off.rollout(view.demo_params(off.gait))["power_el"])

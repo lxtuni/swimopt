@@ -7,7 +7,9 @@ Collect every finished optimization run into thesis_notes/data/all_runs.csv.
 Reads each results_*/<run>/ folder: the metrics saved with the winner (done.json or
 best.json, measured by the scoring rollout itself) and the exact config the run used
 (_cfg.json). Stroke frequency, duty cycle and nearest gait family are recomputed from
-the saved parameter vector with that config. Nothing is re-optimized.
+the saved parameter vector with that config, and the winner is replayed once to add
+the electrical power (shaft power plus copper loss), which older runs did not save.
+Nothing is re-optimized.
 """
 import csv
 import glob
@@ -36,7 +38,8 @@ STUDIES = {
 }
 COLS = ["study", "status", "run", "physics", "family", "seed", "objective", "min_speed",
         "limit_heading", "limit_roll", "limit_pitch", "limit_surfacing", "servo_dps",
-        "budget", "feasible", "speed_m_s", "bl_s", "power_W", "cot_J_m", "freq_Hz", "duty",
+        "budget", "feasible", "speed_m_s", "bl_s", "power_W", "cot_J_m", "power_el_W",
+        "cot_el_J_m", "freq_Hz", "duty",
         "heading_rms", "roll_rms", "pitch_rms", "impulse_lift_Ns", "impulse_drag_Ns",
         "peak_joint_speed_dps", "torque_sat", "surfacing", "nearest_family", "deviation"]
 
@@ -60,6 +63,7 @@ def rows():
             x = np.array(b["x"])
             p = g.decode(x)
             st = g.structure(x)
+            pel = float(b["power_el"]) if "power_el" in b else float(cache[key].rollout(x)["power_el"])
             lim = c.get("limits") or {}
             obj = c.get("objective") or {}
             spd = float(b["speed"])
@@ -76,6 +80,8 @@ def rows():
                 "speed_m_s": round(spd, 4), "bl_s": round(b["bl_s"], 3),
                 "power_W": round(b["power"], 3),
                 "cot_J_m": round(b["power"] / spd, 2) if spd > 1e-3 else "",
+                "power_el_W": round(pel, 3) if pel == pel else "",
+                "cot_el_J_m": round(pel / spd, 2) if spd > 1e-3 and pel == pel else "",
                 "freq_Hz": round(p["freq"], 3), "duty": round(p["duty"], 3),
                 "heading_rms": round(b["heading_rms"], 2), "roll_rms": round(b["roll_rms"], 2),
                 "pitch_rms": round(b["pitch_rms"], 2),

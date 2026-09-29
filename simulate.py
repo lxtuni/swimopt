@@ -108,6 +108,9 @@ class Swimmer:
           chattered at 3000 deg/s.
         """
         self.back_emf = np.zeros(self.model.nu)
+        # Copper loss of the same motor: R*i^2 = (R/kt^2) tau^2, and with kt = V/wmax,
+        # R = V/i_stall, i_stall = ts/kt this is tau^2 * wmax/ts. No new parameter.
+        self.copper = np.zeros(self.model.nu)
         if not self.servo_speed:
             return
         wmax = math.radians(self.servo_speed)
@@ -116,6 +119,7 @@ class Swimmer:
             dof = self.model.jnt_dofadr[self.model.actuator_trnid[a, 0]]
             self.model.dof_damping[dof] += b
             self.back_emf[a] = b
+            self.copper[a] = wmax / self.tau_stall[a]
 
     def _estimate_body_length(self):
         """Span along world x of every robot geom's bounding sphere, initial pose."""
@@ -242,7 +246,7 @@ class Swimmer:
         p0 = d.xpos[tid].copy()
         yaw0 = self._yaw()
         self.hydro.reset_impulse()      # only count thrust from the scored window
-        energy = 0.0
+        energy = energy_el = 0.0
         pitch_max = roll_max = pitch_sq = roll_sq = head_sq = 0.0
         peak_w = 0.0
         n_sat = n_surf = 0
@@ -257,7 +261,12 @@ class Swimmer:
             if blew_up():
                 return self.diverged(traj)
             # power at the motor shaft: actuator torque less the back-EMF drag
-            energy += float(np.abs((af - self.back_emf * av) * av).sum()) * dt
+            tau = af - self.back_emf * av
+            p_mech = tau * av
+            energy += float(np.abs(p_mech).sum()) * dt
+            # electrical: shaft power when driving (braking is dumped, not regenerated)
+            # plus the copper loss, which a servo pays even when it holds still
+            energy_el += float((np.maximum(p_mech, 0.0) + self.copper * tau * tau).sum()) * dt
             pitch = abs(math.asin(min(1.0, max(-1.0, -xmat[6]))))
             roll = abs(math.atan2(xmat[7], xmat[8]))
             if pitch > pitch_max:
@@ -296,7 +305,8 @@ class Swimmer:
                          duration=span, surfacing=n_surf / n_steps)
         res.update(self.thrust_split(fwd))
         res.update(peak_joint_speed=math.degrees(peak_w), torque_sat=n_sat / n_steps,
-                   surfacing=n_surf / n_steps)
+                   surfacing=n_surf / n_steps,
+                   power_el=(energy_el / res["duration"]) if self.servo_speed else float("nan"))
         return res
 
     def thrust_split(self, fwd):
@@ -368,7 +378,7 @@ Feasibility comes first. A gait is feasible when its RMS heading, roll and pitch
         return dict(ok=False, fitness=DIVERGED, dist=0.0, speed=0.0, bl_s=0.0, yaw=0.0,
                     heading_rms=0.0, roll_rms=0.0, pitch_rms=0.0,
                     pitch_amp=0.0, roll_amp=0.0, penalty=0.0, feasible=False,
-                    energy=0.0, power=0.0, duration=0.0,
+                    energy=0.0, power=0.0, power_el=0.0, duration=0.0,
                     thrust_drag=0.0, thrust_lift=0.0, lift_share=0.0,
                     peak_joint_speed=0.0, torque_sat=0.0, surfacing=0.0,
                     traj=traj if traj is not None else [])

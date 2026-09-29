@@ -27,7 +27,7 @@ import mujoco
 from simulate import Swimmer, load_cfg, record_best, atomic_json_dump
 
 LOG_FIELDS = ["eval", "gen", "fitness", "speed", "heading_rms", "roll_rms", "pitch_rms",
-              "power", "thrust_lift", "thrust_drag", "peak_joint_speed", "torque_sat",
+              "power", "power_el", "thrust_lift", "thrust_drag", "peak_joint_speed", "torque_sat",
               "surfacing", "feasible", "ok"]
 
 # ---------- worker processes ----------
